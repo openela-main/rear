@@ -3,7 +3,7 @@
 Summary:    Relax-and-Recover is a Linux disaster recovery and system migration tool
 Name:       rear
 Version:    2.6
-Release:    9%{?dist}
+Release:    10%{?dist}
 License:    GPLv3
 Group:      Applications/File
 URL:        http://relax-and-recover.org/
@@ -34,6 +34,11 @@ Patch52: rear-bz2091163.patch
 Patch53: rear-bz2130945.patch
 Patch54: rear-bz2131946.patch
 Patch56: s390-no-clobber-disks.patch
+Patch58: rear-device-shrinking-bz2223895.patch
+Patch59: rear-usb-uefi-part-size-bz2228402.patch
+Patch60: rear-luks-key-bz2228779.patch
+Patch61: rear-uefi-usb-secureboot-bz2196445.patch
+Patch62: rear-vg-command-not-found-bz2121476.patch
 
 ### Dependencies on all distributions
 BuildRequires:   asciidoc
@@ -161,6 +166,11 @@ fi
 %patch53 -p1
 %patch54 -p1
 %patch56 -p1
+%patch58 -p1
+%patch59 -p1
+%patch60 -p1
+%patch61 -p1
+%patch62 -p1
 
 echo "30 1 * * * root test -f /var/lib/rear/layout/disklayout.conf && /usr/sbin/rear checklayout || /usr/sbin/rear mkrescue" >rear.cron
 
@@ -194,6 +204,15 @@ TZ=UTC %{__make} -C doc
 %{_sbindir}/rear
 
 %changelog
+* Tue Aug 22 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-10
+- Apply PR 3027 to ensure correct creation of the rescue environment
+  when a file is shrinking while being read
+- Backport PR 2774 to increase USB_UEFI_PART_SIZE to 1024 MiB
+- Apply upstream patch for temp dir usage with LUKS to ensure
+  that during recovery an encrypted disk can be unlocked using a keyfile
+- Backport upstream PR 3031: Secure Boot support for OUTPUT=USB
+- Correct a mistake done when backporting PR 2691
+
 * Wed Feb 22 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-9
 - Backport PR2943 to fix s390x dasd formatting
 - Require s390utils-{core,base} on s390x

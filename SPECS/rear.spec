@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 17%{?dist}
+Release: 19%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -44,6 +44,13 @@ Patch53: rear-bz2091163.patch
 Patch54: rear-bz2130945.patch
 Patch55: rear-bz2131946.patch
 Patch56: s390-no-clobber-disks.patch
+Patch57: rear-bz2188593-nbu-systemd.patch
+Patch58: rear-device-shrinking-bz2223895.patch
+Patch59: rear-usb-uefi-part-size-bz2228402.patch
+Patch60: rear-luks-key-bz2228779.patch
+Patch61: rear-uefi-usb-secureboot-bz2196445.patch
+Patch62: rear-vg-command-not-found-bz2121476.patch
+Patch63: rear-remove-lvmdevices-bz2145014.patch
 
 # rear contains only bash scripts plus documentation so that on first glance it could be "BuildArch: noarch"
 # but actually it is not "noarch" because it only works on those architectures that are explicitly supported.
@@ -169,6 +176,20 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Fri Aug 25 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-19
+- Add patch to force removal of lvmdevices, prevents LVM problems after
+  restoring to different disks/cloning. Upstream PR 3043
+
+* Tue Aug 22 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-18
+- Add patch to start rsyslog and include NBU systemd units
+- Apply PR 3027 to ensure correct creation of the rescue environment
+  when a file is shrinking while being read
+- Backport PR 2774 to increase USB_UEFI_PART_SIZE to 1024 MiB
+- Apply upstream patch for temp dir usage with LUKS to ensure
+  that during recovery an encrypted disk can be unlocked using a keyfile
+- Backport upstream PR 3031: Secure Boot support for OUTPUT=USB
+- Correct a mistake done when backporting PR 2691
+
 * Wed Feb 22 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-17
 - Backport PR2943 to fix s390x dasd formatting
 - Require s390utils-{core,base} on s390x

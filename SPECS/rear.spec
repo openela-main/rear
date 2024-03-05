@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 19%{?dist}
+Release: 20%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -51,6 +51,8 @@ Patch60: rear-luks-key-bz2228779.patch
 Patch61: rear-uefi-usb-secureboot-bz2196445.patch
 Patch62: rear-vg-command-not-found-bz2121476.patch
 Patch63: rear-remove-lvmdevices-bz2145014.patch
+Patch64: rear-save-lvm-poolmetadatasize-RHEL-6984.patch
+Patch65: rear-skip-useless-xfs-mount-options-RHEL-10478.patch
 
 # rear contains only bash scripts plus documentation so that on first glance it could be "BuildArch: noarch"
 # but actually it is not "noarch" because it only works on those architectures that are explicitly supported.
@@ -176,6 +178,13 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Fri Dec  1 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-20
+- Backport PR 3061 to save LVM pool metadata volume size in disk layout
+  and restore it
+- Backport PR 3058 to skip useless xfs mount options when mounting
+  during recovery, prevents mount errors like "logbuf size must be greater
+  than or equal to log stripe size"
+
 * Fri Aug 25 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-19
 - Add patch to force removal of lvmdevices, prevents LVM problems after
   restoring to different disks/cloning. Upstream PR 3043

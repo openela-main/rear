@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 20%{?dist}
+Release: 21%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -53,6 +53,14 @@ Patch62: rear-vg-command-not-found-bz2121476.patch
 Patch63: rear-remove-lvmdevices-bz2145014.patch
 Patch64: rear-save-lvm-poolmetadatasize-RHEL-6984.patch
 Patch65: rear-skip-useless-xfs-mount-options-RHEL-10478.patch
+
+# make initrd accessible only by root
+# https://github.com/rear/rear/commit/89b61793d80bc2cb2abe47a7d0549466fb087d16
+Patch111: rear-CVE-2024-23301.patch
+
+# Support saving and restoring hybrid BIOS/UEFI bootloader setup and clean up bootloader detection
+# https://github.com/rear/rear/pull/3145
+Patch113: rear-restore-hybrid-bootloader-RHEL-16864.patch
 
 # rear contains only bash scripts plus documentation so that on first glance it could be "BuildArch: noarch"
 # but actually it is not "noarch" because it only works on those architectures that are explicitly supported.
@@ -178,6 +186,10 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Thu Feb  8 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-21
+- Support saving and restoring hybrid BIOS/UEFI bootloader, PRs 3145 3136
+- make initrd accessible only by root (CVE-2024-23301), PR 3123
+
 * Fri Dec  1 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-20
 - Backport PR 3061 to save LVM pool metadata volume size in disk layout
   and restore it

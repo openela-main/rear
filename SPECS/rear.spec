@@ -3,7 +3,7 @@
 Summary:    Relax-and-Recover is a Linux disaster recovery and system migration tool
 Name:       rear
 Version:    2.6
-Release:    10%{?dist}
+Release:    11%{?dist}
 License:    GPLv3
 Group:      Applications/File
 URL:        http://relax-and-recover.org/
@@ -39,6 +39,10 @@ Patch59: rear-usb-uefi-part-size-bz2228402.patch
 Patch60: rear-luks-key-bz2228779.patch
 Patch61: rear-uefi-usb-secureboot-bz2196445.patch
 Patch62: rear-vg-command-not-found-bz2121476.patch
+
+# make initrd accessible only by root
+# https://github.com/rear/rear/commit/89b61793d80bc2cb2abe47a7d0549466fb087d16
+Patch111: rear-CVE-2024-23301.patch
 
 ### Dependencies on all distributions
 BuildRequires:   asciidoc
@@ -171,6 +175,7 @@ fi
 %patch60 -p1
 %patch61 -p1
 %patch62 -p1
+%patch111 -p1
 
 echo "30 1 * * * root test -f /var/lib/rear/layout/disklayout.conf && /usr/sbin/rear checklayout || /usr/sbin/rear mkrescue" >rear.cron
 
@@ -204,6 +209,9 @@ TZ=UTC %{__make} -C doc
 %{_sbindir}/rear
 
 %changelog
+* Wed Feb 21 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-11
+- make initrd accessible only by root (CVE-2024-23301), PR 3123
+
 * Tue Aug 22 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-10
 - Apply PR 3027 to ensure correct creation of the rescue environment
   when a file is shrinking while being read

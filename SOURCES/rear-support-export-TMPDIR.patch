@@ -1,0 +1,63 @@
+diff --git a/usr/sbin/rear b/usr/sbin/rear
+index d2cb6c070..ea66f0a98 100755
+--- a/usr/sbin/rear
++++ b/usr/sbin/rear
+@@ -376,6 +376,10 @@ fi
+ # and fd6 to get input from the user regardless where to STDIN is redirected:
+ source $SHARE_DIR/lib/_input-output-functions.sh
+ 
++# Used to determine whether TMPDIR has been changed in user config.
++# Save the current value to detect changes.
++saved_tmpdir="${TMPDIR-}"
++
+ # Keep old log file:
+ test -r "$RUNTIME_LOGFILE" && mv -f "$RUNTIME_LOGFILE" "$RUNTIME_LOGFILE".old 2>/dev/null
+ 
+@@ -446,6 +450,14 @@ for config in site local rescue ; do
+         test "$( tr -d -c '\r' < $CONFIG_DIR/$config.conf )" && Error "Carriage return character in $CONFIG_DIR/$config.conf (perhaps DOS or Mac format)"
+         Source "$CONFIG_DIR/$config.conf" || true
+     fi
++    if [ "$config" == local ] ; then
++        # changing TMPDIR in rescue.conf is expected for now, see
++        # rescue/GNU/Linux/600_unset_TMPDIR_in_rescue_conf.sh,
++        # so perform the check after reading local.conf but before rescue.conf
++        if [ "$saved_tmpdir" != "${TMPDIR-}" ] ; then
++            LogPrintError "Warning: Setting TMPDIR in a configuration file is deprecated. To specify a working area directory prefix, export TMPDIR before executing '$PROGRAM'"
++        fi
++    fi
+ done
+ # Finally source additional configuration files if specified on the command line:
+ if test "$CONFIG_APPEND_FILES" ; then
+diff --git a/usr/share/rear/conf/default.conf b/usr/share/rear/conf/default.conf
+index d5fe6dcc4..4e67e38c9 100644
+--- a/usr/share/rear/conf/default.conf
++++ b/usr/share/rear/conf/default.conf
+@@ -50,12 +50,9 @@
+ # which usually results /tmp/rear.XXXXXXXXXXXXXXX or $TMPDIR/rear.XXXXXXXXXXXXXXX
+ # the latter when the canonical Linux/Unix environment variable TMPDIR
+ # is set in the environment where /usr/sbin/rear is called.
+-# To have a specific working area directory prefix for Relax-and-Recover
+-# specify in /etc/rear/local.conf something like
+-#
++# To have a specific working area directory prefix for Relax-and-Recover call
+ #   export TMPDIR="/prefix/for/rear/working/directory"
+-#
+-# where /prefix/for/rear/working/directory must already exist.
++# before calling 'rear' (/prefix/for/rear/working/directory must already exist).
+ # This is useful for example when there is not sufficient free space
+ # in /var/tmp or $TMPDIR for the ISO image or even the backup archive.
+ # TMPDIR cannot be set to a default value here unconditionally but only
+diff --git a/usr/share/rear/rescue/GNU/Linux/600_unset_TMPDIR_in_rescue_conf.sh b/usr/share/rear/rescue/GNU/Linux/600_unset_TMPDIR_in_rescue_conf.sh
+new file mode 100644
+index 000000000..84d0cabb2
+--- /dev/null
++++ b/usr/share/rear/rescue/GNU/Linux/600_unset_TMPDIR_in_rescue_conf.sh
+@@ -0,0 +1,8 @@
++cat - <<EOF >> "$ROOTFS_DIR/etc/rear/rescue.conf"
++# TMPDIR variable may be defined in local.conf file as prefix dir for mktemp command
++# e.g. by defining TMPDIR=/var we would get our BUILD_DIR=/var/tmp/rear.XXXXXXXXXXXX
++# However, in rescue we want our BUILD_DIR=/tmp/rear.XXXXXXX as we are not sure that
++# the user defined TMPDIR would exist in our rescue image
++# by 'unset TMPDIR' we achieve above goal (as rescue.conf is read after local.conf)!
++unset TMPDIR
++EOF

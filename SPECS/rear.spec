@@ -3,7 +3,7 @@
 Summary:    Relax-and-Recover is a Linux disaster recovery and system migration tool
 Name:       rear
 Version:    2.6
-Release:    11%{?dist}
+Release:    12%{?dist}
 License:    GPLv3
 Group:      Applications/File
 URL:        http://relax-and-recover.org/
@@ -39,10 +39,20 @@ Patch59: rear-usb-uefi-part-size-bz2228402.patch
 Patch60: rear-luks-key-bz2228779.patch
 Patch61: rear-uefi-usb-secureboot-bz2196445.patch
 Patch62: rear-vg-command-not-found-bz2121476.patch
+Patch64: rear-save-lvm-poolmetadatasize-RHEL-6984.patch
+Patch65: rear-skip-useless-xfs-mount-options-RHEL-10478.patch
 
 # make initrd accessible only by root
 # https://github.com/rear/rear/commit/89b61793d80bc2cb2abe47a7d0549466fb087d16
 Patch111: rear-CVE-2024-23301.patch
+
+# Support saving and restoring hybrid BIOS/UEFI bootloader setup and clean up bootloader detection
+# https://github.com/rear/rear/pull/3145
+Patch113: rear-restore-hybrid-bootloader-RHEL-16864.patch
+
+# Skip invalid disk drives (zero sized, no media) when saving layout
+# https://github.com/rear/rear/commit/808b15a677191aac62faadd1bc71885484091316
+Patch115: rear-skip-invalid-drives-RHEL-22863.patch
 
 ### Dependencies on all distributions
 BuildRequires:   asciidoc
@@ -175,7 +185,11 @@ fi
 %patch60 -p1
 %patch61 -p1
 %patch62 -p1
+%patch64 -p1
+%patch65 -p1
 %patch111 -p1
+%patch113 -p1
+%patch115 -p1
 
 echo "30 1 * * * root test -f /var/lib/rear/layout/disklayout.conf && /usr/sbin/rear checklayout || /usr/sbin/rear mkrescue" >rear.cron
 
@@ -209,8 +223,15 @@ TZ=UTC %{__make} -C doc
 %{_sbindir}/rear
 
 %changelog
-* Wed Feb 21 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-11
+* Wed Feb 21 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-12
+- Skip invalid disk drives when saving layout PR 3047
+- Support saving and restoring hybrid BIOS/UEFI bootloader, PRs 3145 3136
 - make initrd accessible only by root (CVE-2024-23301), PR 3123
+- Backport PR 3061 to save LVM pool metadata volume size in disk layout
+  and restore it
+- Backport PR 3058 to skip useless xfs mount options when mounting
+  during recovery, prevents mount errors like "logbuf size must be greater
+  than or equal to log stripe size"
 
 * Tue Aug 22 2023 Pavel Cahyna <pcahyna@redhat.com> - 2.6-10
 - Apply PR 3027 to ensure correct creation of the rescue environment

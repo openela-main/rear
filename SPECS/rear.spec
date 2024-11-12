@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 24%{?dist}
+Release: 25%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -69,6 +69,19 @@ Patch114: rear-resolve-libraries-for-symlinks-in-COPY_AS_IS-RHEL-15108.patch
 # Skip invalid disk drives (zero sized, no media) when saving layout
 # https://github.com/rear/rear/commit/808b15a677191aac62faadd1bc71885484091316
 Patch115: rear-skip-invalid-drives-RHEL-22863.patch
+
+# Fix useless warning that libsystemd-core requires additional libraries
+# and ReaR recovery system needs additional libraries
+# https://github.com/rear/rear/pull/3250
+Patch116: rear-fix-libsystemd-ldd-warning.patch
+
+# Fix IPv6 addresses in nfs:// and sshfs:// BACKUP/OUTPUT_URL
+# https://github.com/rear/rear/pull/3242
+Patch117: rear-fix-ipv6.patch
+
+# Remove obsolete FAT16 options to avoid kernel warning
+# https://github.com/rear/rear/pull/2576
+Patch118: rear-no-fat-16.patch
 
 ######################
 # downstream patches #
@@ -204,6 +217,12 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Sat Jul 20 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-25
+- Backport PR 3250 to fix useless warning that libsystemd-core requires
+  additional libraries and ReaR recovery system needs additional libraries
+- Backport PR 3242 to fix IPv6 address in nfs:// and sshfs:// BACKUP/OUTPUT_URL
+- Backport PR 2576 to remove obsolete FAT16 options to avoid kernel warning
+
 * Sat Feb 24 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-24
 - Support "export TMPDIR" in user configuration again, print a warning
   when this is used - revert commit f464eae2, adapt PR 3163, add commit

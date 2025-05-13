@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 25%{?dist}
+Release: 26%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -82,6 +82,14 @@ Patch117: rear-fix-ipv6.patch
 # Remove obsolete FAT16 options to avoid kernel warning
 # https://github.com/rear/rear/pull/2576
 Patch118: rear-no-fat-16.patch
+
+# Install GRUB on multipath disks
+# https://github.com/rear/rear/pull/3334
+Patch119: rear-multipath-bios-grub.patch
+
+# Improve docs of layout configuration in user guide
+# https://github.com/rear/rear/pull/3125
+Patch121: rear-improve-layout-guide.patch
 
 ######################
 # downstream patches #
@@ -217,6 +225,10 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Tue Feb 11 2025 Pavel Cahyna <pcahyna@redhat.com> - 2.6-26
+- Install GRUB on multipath disks, PR 3334
+- Improve docs of layout configuration in user guide, PR 3125
+
 * Sat Jul 20 2024 Pavel Cahyna <pcahyna@redhat.com> - 2.6-25
 - Backport PR 3250 to fix useless warning that libsystemd-core requires
   additional libraries and ReaR recovery system needs additional libraries

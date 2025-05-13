@@ -1,0 +1,25 @@
+commit 6289aae51d60d0ce326913f3fc30f5325abb483d
+Author: Renaud Métrich <1163635+rmetrich@users.noreply.github.com>
+Date:   Fri Oct 25 09:14:50 2024 +0200
+
+    Make get_disklabel_type() also work for 'multipath' devices (#3334)
+    
+    Without this fix, get_disklabel_type() used to find a disk to install GRUB on
+    was returning nothing when the disk was a multipath device.
+    The reason is that then the line in disklayout.conf starts with 'multipath'
+    but ReaR had searched for 'disk' only. Now it also searches for 'multipath'.
+    See https://github.com/rear/rear/pull/3334
+
+diff --git a/usr/share/rear/lib/layout-functions.sh b/usr/share/rear/lib/layout-functions.sh
+index 90b16cb20..0763963de 100644
+--- a/usr/share/rear/lib/layout-functions.sh
++++ b/usr/share/rear/lib/layout-functions.sh
+@@ -529,7 +529,7 @@ function get_disklabel_type () {
+ 
+     disk=''
+ 
+-    read component disk size label junk < <(grep "^disk $1 " "$LAYOUT_FILE")
++    read component disk size label junk < <(grep -E "^(disk|multipath) $1 " "$LAYOUT_FILE")
+     test $disk || return 1
+ 
+     echo $label

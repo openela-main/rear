@@ -1,0 +1,34 @@
+commit 7c674a213e25eb70ee4cf8996907a4fc19e2bb4e
+Author: Pavel Cahyna <pcahyna@redhat.com>
+Date:   Mon Jul 28 18:02:24 2025 +0200
+
+    Preserve compatibility when OUTPUT=IPL is used
+
+    OUTPUT=IPL did not respect RAMDISK_SUFFIX when it was a separate
+    output method. Restore this behavior. This restores the naming
+    convention for output files (kernel and ramdisk).
+
+    (cherry picked from commit b473c3cf3cdfd69d602bc28bf3abd47a0fa09637)
+
+diff --git a/usr/share/rear/prep/Linux-s390/034_check_config.sh b/usr/share/rear/prep/Linux-s390/034_check_config.sh
+index 0f3296812..a1b1d76f4 100644
+--- a/usr/share/rear/prep/Linux-s390/034_check_config.sh
++++ b/usr/share/rear/prep/Linux-s390/034_check_config.sh
+@@ -1,6 +1,17 @@
+ if [ "$OUTPUT" = "IPL" ]; then
+     LogPrintError "Warning: OUTPUT=IPL is deprecated. Use OUTPUT=RAMDISK instead."
+     OUTPUT=RAMDISK
++    # OUTPUT=IPL did not respect RAMDISK_SUFFIX when it was a separate
++    # output method.
++    # Preserve compatibility when OUTPUT=IPL is still used.
++    # Note: overriding the value of RAMDISK_SUFFIX here is fine,
++    # since the only place where RAMDISK_SUFFIX is used is the
++    # OUTPUT=RAMDISK code, and if OUTPUT=IPL, the user has no use
++    # for RAMDISK_SUFFIX, so presumably its value has come from default.conf
++    # (so we do not risk clobbering an user-specified value).
++    # If users intend RAMDISK_SUFFIX to be used, they should use
++    # OUTPUT=RAMDISK.
++    RAMDISK_SUFFIX=""
+ fi
+ 
+ if [ "$OUTPUT" != "RAMDISK" ] ; then

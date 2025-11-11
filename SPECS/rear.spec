@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 26%{?dist}
+Release: 27%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -91,6 +91,30 @@ Patch119: rear-multipath-bios-grub.patch
 # https://github.com/rear/rear/pull/3125
 Patch121: rear-improve-layout-guide.patch
 
+# skip longhorn iscsi devices in disklayout.conf
+# https://github.com/rear/rear/commit/d765abff976a8346ce6afa432c9a09d67ed63482
+Patch122: rear-skip-longhorn-iscsi-RHEL-83551.patch
+
+# fix PPC PReP Boot detection on GPT layouts
+# https://github.com/rear/rear/commit/1ca518c2a0e675ace956ef71bc79d67e4990562b
+Patch123: rear-detect-prep-boot-on-gpt-RHEL-82098.patch
+
+# fix recovery of LUKS encrypted systems with multiple keyslots
+# https://github.com/rear/rear/commit/e9ce93f096e505968cc728a7eb5a06e25dc8d88b
+Patch124: rear-support-multi-keyslot-luks-RHEL-83776.patch
+
+# support generation of ed25519 SSH host keys in the rescue image
+# https://github.com/rear/rear/commit/62d9a744ff710de34035ce15bd1b1bf810b6934a
+Patch125: rear-rescue-ed25519-hostkey-support-RHEL-83479.patch
+
+# enhance the 300_map_disks.sh script to also print the disk sizes
+# https://github.com/rear/rear/commit/43d62fdfcac50b35be4f99d45bac3b5340525a7a
+Patch126: rear-print-disk-mapping-with-sizes-RHEL-83241.patch
+
+# add initial support for arm/aarch64 machines with UEFI
+# https://github.com/rear/rear/commit/9b28f14fad26ff00a6f90b13c3e4906d85f3ae3c
+Patch127: rear-support-aarch64-uefi-RHEL-56045.patch
+
 ######################
 # downstream patches #
 ######################
@@ -101,20 +125,29 @@ Patch206: rear-nbu-RHEL-17390-RHEL-17393.patch
 # support "export TMPDIR" again, temporarily, with a warning.
 Patch207: rear-support-export-TMPDIR.patch
 
+# error out if any unsupported OUTPUT used on s390
+Patch208: rear-error-output-s390x-RHEL-99362.patch
+
 # rear contains only bash scripts plus documentation so that on first glance it could be "BuildArch: noarch"
 # but actually it is not "noarch" because it only works on those architectures that are explicitly supported.
 # Of course the rear bash scripts can be installed on any architecture just as any binaries can be installed on any architecture.
 # But the meaning of architecture dependent packages should be on what architectures they will work.
 # Therefore only those architectures that are actually supported are explicitly listed.
-# This avoids that rear can be "just installed" on architectures that are actually not supported (e.g. ARM):
-ExclusiveArch: %ix86 x86_64 ppc ppc64 ppc64le ia64 s390x
+# This avoids that rear can be "just installed" on architectures that are actually not supported:
+ExclusiveArch: %ix86 x86_64 ppc ppc64 ppc64le ia64 s390x %arm aarch64
 # Furthermore for some architectures it requires architecture dependent packages (like syslinux for x86 and x86_64)
 # so that rear must be architecture dependent because ifarch conditions never match in case of "BuildArch: noarch"
 # see the GitHub issue https://github.com/rear/rear/issues/629
 %ifarch %ix86 x86_64
-Requires: syslinux
+Requires: syslinux-extlinux
+%endif
+# See https://github.com/rhboot/efi-rpm-macros/blob/main/README
+%ifarch %{efi}
 # We need mkfs.vfat for recreating EFI System Partition
 Recommends: dosfstools
+# Needed for ISO image creation
+Recommends: grub2-efi-%{efi_arch}-modules
+Recommends: grub2-tools-extra
 %endif
 %ifarch ppc ppc64 ppc64le
 # Called by grub2-install (except on PowerNV)
@@ -132,6 +165,7 @@ Requires:   s390utils-core
 # (in addition to the default installed bootloader grub2) while on ppc ppc64 the
 # default installed bootloader yaboot is also useed to make the bootable ISO image.
 
+BuildRequires: efi-srpm-macros
 # Required for HTML user guide
 BuildRequires: make
 BuildRequires: asciidoctor
@@ -225,6 +259,18 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Thu Aug 14 2025 Pavel Cahyna <pcahyna@redhat.com> - 2.6-27
+- add dependency on grub2-tools-extra and GRUB EFI modules on EFI machines
+- add dependency on syslinux-extlinux on x86
+- add initial support for aarch64 machines with UEFI
+- enhance the 300_map_disks.sh script to also print the disk sizes
+- support generation of ed25519 SSH host keys in the rescue image
+- create sshd home directory in the rescue image on systems upgraded from EL8
+- fix recovery of LUKS encrypted systems with multiple keyslots
+- fix PPC PReP Boot detection on GPT layouts
+- skip longhorn iscsi devices in disklayout.conf
+- error out if any unsupported OUTPUT used on s390x
+
 * Tue Feb 11 2025 Pavel Cahyna <pcahyna@redhat.com> - 2.6-26
 - Install GRUB on multipath disks, PR 3334
 - Improve docs of layout configuration in user guide, PR 3125

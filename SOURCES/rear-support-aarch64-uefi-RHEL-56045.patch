@@ -1,0 +1,682 @@
+diff --git a/packaging/rpm/rear.spec b/packaging/rpm/rear.spec
+index afb31e1e4..910c9f89a 100644
+--- a/packaging/rpm/rear.spec
++++ b/packaging/rpm/rear.spec
+@@ -29,8 +29,8 @@ BuildRoot: %(mktemp -ud %{_tmppath}/%{name}-%{version}-%{release}-XXXXXX)
+ # Of course the rear bash scripts can be installed on any architecture just as any binaries can be installed on any architecture.
+ # But the meaning of architecture dependent packages should be on what architectures they will work.
+ # Therefore only those architectures that are actually supported are explicitly listed.
+-# This avoids that rear can be "just installed" on architectures that are actually not supported (e.g. ARM or IBM z Systems):
+-ExclusiveArch: %ix86 x86_64 ppc ppc64 ppc64le ia64
++# This avoids that rear can be "just installed" on architectures that are actually not supported:
++ExclusiveArch: %ix86 x86_64 ppc ppc64 ppc64le ia64 s390x %arm aarch64
+ # Furthermore for some architectures it requires architecture dependent packages (like syslinux for x86 and x86_64)
+ # so that rear must be architecture dependent because ifarch conditions never match in case of "BuildArch: noarch"
+ # see the GitHub issue https://github.com/rear/rear/issues/629
+diff --git a/usr/share/rear/conf/default.conf b/usr/share/rear/conf/default.conf
+index 826f1ee59..17bf1a110 100644
+--- a/usr/share/rear/conf/default.conf
++++ b/usr/share/rear/conf/default.conf
+@@ -784,9 +784,9 @@ ISO_RECOVER_MODE=""
+ ##
+ #
+ # OUTPUT=USB is only supported on PC-compatible (Linux-i386/x86/x86_64) architecture
+-# see https://github.com/rear/rear/issues/2348
++# see https://github.com/rear/rear/issues/2348 and arm/aarch64 using EFI.
+ # Accordingly in case of false usage of OUTPUT=USB on non-PC-compatible architectures
+-# (i.e. the POWER architectures ppc64/ppc64le, IBM Z s390/s390x, and ARM)
++# (i.e. the POWER architectures ppc64/ppc64le, IBM Z s390/s390x)
+ # "rear mkrescue/mkbackup" errors out because on those architectures the USB medium cannot be booted
+ # because for non-PC-compatible architectures there are no scripts that install a USB bootloader.
+ # On non-PC-compatible architectures a possible alternative could be OUTPUT=RAMDISK (see above)
+diff --git a/usr/share/rear/finalize/Linux-arm/610_EFISTUB_run_efibootmgr.sh b/usr/share/rear/finalize/Linux-arm/610_EFISTUB_run_efibootmgr.sh
+new file mode 120000
+index 000000000..92f571a6b
+--- /dev/null
++++ b/usr/share/rear/finalize/Linux-arm/610_EFISTUB_run_efibootmgr.sh
+@@ -0,0 +1 @@
++../Linux-i386/610_EFISTUB_run_efibootmgr.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/finalize/Linux-arm/670_run_efibootmgr.sh b/usr/share/rear/finalize/Linux-arm/670_run_efibootmgr.sh
+new file mode 120000
+index 000000000..5b967460e
+--- /dev/null
++++ b/usr/share/rear/finalize/Linux-arm/670_run_efibootmgr.sh
+@@ -0,0 +1 @@
++../Linux-i386/670_run_efibootmgr.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/layout/save/default/445_guess_bootloader.sh b/usr/share/rear/layout/save/default/445_guess_bootloader.sh
+index 3576c387c..0211a4d6c 100644
+--- a/usr/share/rear/layout/save/default/445_guess_bootloader.sh
++++ b/usr/share/rear/layout/save/default/445_guess_bootloader.sh
+@@ -30,15 +30,6 @@ if test -f /etc/sysconfig/bootloader ; then
+     fi
+ fi
+ 
+-# On ARM, guess the dummy bootloader:
+-if [ "$ARCH" = "Linux-arm" ] ; then
+-    BOOTLOADER=ARM
+-    # Inform the user that we do nothing:
+-    LogPrint "Using guessed bootloader 'ARM'. Skipping bootloader backup, see default.conf"
+-    echo "$BOOTLOADER" >$bootloader_file
+-    return
+-fi
+-
+ # Check if any disk contains a PPC PReP boot partition.
+ # Detection taken from usr/share/rear/finalize/Linux-ppc64/680_install_PPC_bootlist.sh
+ disk_device="$( awk -F ' ' '/^part / {if ($6 ~ /prep/) {print $2}}' $LAYOUT_FILE )"
+@@ -127,6 +118,15 @@ if is_true $USING_UEFI_BOOTLOADER ; then
+     return 0
+ fi
+ 
++# On ARM, guess the dummy bootloader:
++if [ "$ARCH" = "Linux-arm" ] ; then
++    BOOTLOADER=ARM
++    # Inform the user that we do nothing:
++    LogPrint "Using guessed bootloader 'ARM'. Skipping bootloader backup, see default.conf about 'BOOTLOADER'"
++    echo "$BOOTLOADER" >$bootloader_file
++    return
++fi
++
+ # Error out when no bootloader was specified or could be autodetected:
+ Error "Cannot autodetect what is used as bootloader, see default.conf about 'BOOTLOADER'"
+ 
+diff --git a/usr/share/rear/lib/uefi-functions.sh b/usr/share/rear/lib/uefi-functions.sh
+index 47f3c4fc3..bb79035e5 100644
+--- a/usr/share/rear/lib/uefi-functions.sh
++++ b/usr/share/rear/lib/uefi-functions.sh
+@@ -36,7 +36,7 @@ function trim {
+     echo -n "$var"
+ }
+ 
+-function build_bootx86_efi {
++function build_boot_efi {
+     local outfile="$1"
+     local embedded_config=""
+     local gmkstandalone=""
+@@ -62,9 +62,10 @@ function build_bootx86_efi {
+         # At least SUSE systems use 'grub2' prefixed names for GRUB2 programs:
+         gmkstandalone=grub2-mkstandalone
+     else
+-        # This build_bootx86_efi function is only called in output/ISO/Linux-i386/250_populate_efibootimg.sh
+-        # which runs only if UEFI is used so that we simply error out here if we cannot make a bootable EFI image of GRUB2
+-        # (normally a function should not exit out but return to its caller with a non-zero return code):
++        # This build_boot_efi function is only called in 250_populate_efibootimg.sh
++        # and 100_create_efiboot.sh and 940_grub2_rescue.sh
++        # only if UEFI is used so that we simply error out here if we cannot make a bootable EFI image of GRUB2
++        # (normally a function should not exit but return to its caller with a non-zero return code):
+         Error "Cannot make bootable EFI image of GRUB2 (neither grub-mkstandalone nor grub2-mkstandalone found)"
+     fi
+ 
+@@ -80,9 +81,9 @@ function build_bootx86_efi {
+             LogPrint "Neither grub-probe nor grub2-probe found"
+             # Since openSUSE Leap 15.1 things were moved from /usr/lib/grub2/ to /usr/share/grub2/
+             # cf. https://github.com/rear/rear/issues/2338#issuecomment-594432946
+-            if test /usr/*/grub*/x86_64-efi/partmap.lst ; then
++            if test /usr/*/grub*/"$GRUB2_IMAGE_FORMAT"/partmap.lst ; then
+                 LogPrint "including all partition modules"
+-                modules=( $( cat /usr/*/grub*/x86_64-efi/partmap.lst ) )
++                modules=( $( cat /usr/*/grub*/"$GRUB2_IMAGE_FORMAT"/partmap.lst ) )
+             else
+                 Error "Can not determine partition modules, ${dirs[*]} would be likely inaccessible in GRUB2"
+             fi
+@@ -98,25 +99,25 @@ function build_bootx86_efi {
+         fi
+     fi
+ 
+-    # grub-mkstandalone needs a .../grub*/x86_64-efi/moddep.lst file (cf. https://github.com/rear/rear/issues/1193)
++    # grub-mkstandalone needs a .../grub*/$GRUB2_IMAGE_FORMAT/moddep.lst file (cf. https://github.com/rear/rear/issues/1193)
+     # At least on SUSE systems that is in different 'grub2' directories (cf. https://github.com/rear/rear/issues/2338)
+     # e.g. on openSUSE Leap 15.0 it is in /usr/lib/grub2/x86_64-efi/moddep.lst
+     # but on openSUSE Leap 15.1 that was moved to /usr/share/grub2/x86_64-efi/moddep.lst
+     # and the one in /boot/grub2/x86_64-efi/moddep.lst is a copy of the one in /usr/*/grub2/x86_64-efi/moddep.lst
+     # so we do not error out if we do not find a /x86_64-efi/moddep.lst file because it could be "anywhere else" in the future
+     # but we inform the user here in advance about possible problems when there is no /x86_64-efi/moddep.lst file.
+-    # Careful: usr/sbin/rear sets nullglob so that /usr/*/grub*/x86_64-efi/moddep.lst gets empty if nothing matches
+-    # and 'test -f' succeeds with empty argument so that we cannot use 'test -f /usr/*/grub*/x86_64-efi/moddep.lst'
++    # Careful: usr/sbin/rear sets nullglob so that /usr/*/grub*/$GRUB2_IMAGE_FORMAT/moddep.lst gets empty if nothing matches
++    # and 'test -f' succeeds with empty argument so that we cannot use 'test -f /usr/*/grub*/$GRUB2_IMAGE_FORMAT/moddep.lst'
+     # also 'test -n' succeeds with empty argument but (fortunately/intentionally?) plain 'test' fails with empty argument.
+-    # Another implicit condition that this 'test' works is that '/usr/*/grub*/x86_64-efi/moddep.lst' matches at most one file
+-    # because otherwise e.g. "test /usr/*/grub*/x86_64-efi/mod*" where two files moddep.lst and modinfo.sh match
++    # Another implicit condition that this 'test' works is that '/usr/*/grub*/$GRUB2_IMAGE_FORMAT/moddep.lst' matches at most one file
++    # because otherwise e.g. "test /usr/*/grub*/$GRUB2_IMAGE_FORMAT/mod*" where two files moddep.lst and modinfo.sh match
+     # would falsely fail with "bash: test: ... unary operator expected":
+-    test /usr/*/grub*/x86_64-efi/moddep.lst || LogPrintError "$gmkstandalone may fail to make a bootable EFI image of GRUB2 (no /usr/*/grub*/x86_64-efi/moddep.lst file)"
++    test /usr/*/grub*/"$GRUB2_IMAGE_FORMAT"/moddep.lst || LogPrintError "$gmkstandalone may fail to make a bootable EFI image of GRUB2 (no /usr/*/grub*/$GRUB2_IMAGE_FORMAT/moddep.lst file)"
+ 
+     (( ${#GRUB2_MODULES_UEFI[@]} )) && LogPrint "Installing only ${GRUB2_MODULES_UEFI[*]} modules into $outfile memdisk"
+     (( ${#modules[@]} )) && LogPrint "GRUB2 modules to load: ${modules[*]}"
+ 
+-    if ! $gmkstandalone $v ${GRUB2_MODULES_UEFI:+"--install-modules=${GRUB2_MODULES_UEFI[*]}"} ${modules:+"--modules=${modules[*]}"} -O x86_64-efi -o $outfile $embedded_config ; then
++    if ! $gmkstandalone $v ${GRUB2_MODULES_UEFI:+"--install-modules=${GRUB2_MODULES_UEFI[*]}"} ${modules:+"--modules=${modules[*]}"} -O "$GRUB2_IMAGE_FORMAT" -o $outfile $embedded_config ; then
+         Error "Failed to make bootable EFI image of GRUB2 (error during $gmkstandalone of $outfile)"
+     fi
+ }
+diff --git a/usr/share/rear/output/ISO/Linux-arm/250_populate_efibootimg.sh b/usr/share/rear/output/ISO/Linux-arm/250_populate_efibootimg.sh
+new file mode 120000
+index 000000000..847e8f465
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/250_populate_efibootimg.sh
+@@ -0,0 +1 @@
++../Linux-i386/250_populate_efibootimg.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/output/ISO/Linux-arm/260_EFISTUB_populate.sh b/usr/share/rear/output/ISO/Linux-arm/260_EFISTUB_populate.sh
+new file mode 120000
+index 000000000..93113f663
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/260_EFISTUB_populate.sh
+@@ -0,0 +1 @@
++../Linux-i386/260_EFISTUB_populate.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/output/ISO/Linux-arm/700_create_efibootimg.sh b/usr/share/rear/output/ISO/Linux-arm/700_create_efibootimg.sh
+new file mode 120000
+index 000000000..8aa6a84a3
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/700_create_efibootimg.sh
+@@ -0,0 +1 @@
++../Linux-i386/700_create_efibootimg.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/output/ISO/Linux-arm/800_create_isofs.sh b/usr/share/rear/output/ISO/Linux-arm/800_create_isofs.sh
+new file mode 100644
+index 000000000..0108dac05
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/800_create_isofs.sh
+@@ -0,0 +1,36 @@
++# 800_create_isofs.sh
++#
++# create initramfs for Relax-and-Recover
++#
++# This file is part of Relax-and-Recover, licensed under the GNU General
++# Public License. Refer to the included COPYING for full text of license.
++
++# Based on output/ISO/Linux-i386/800_create_isofs.sh with the creation of the
++# $TMP_DIR/isofs/isolinux directory added.  This allows us to share scripts
++# used on x86_64 EFI machines.
++
++# check that we have mkisofs
++test -x "$ISO_MKISOFS_BIN" || Error "No executable ISO_MKISOFS_BIN '$ISO_MKISOFS_BIN'"
++
++# create some sub-dirs under $TMP_DIR for booting
++# The isolinux directory is used so that the x86_64 EFI scripts can be symlinked directly.
++[[ ! -d $TMP_DIR/isofs/isolinux ]] && mkdir $v -m 755 $TMP_DIR/isofs/isolinux >&2
++
++# kernel and initrd are already included in virtual image of ISO if ebiso is used
++if [[ $(basename $ISO_MKISOFS_BIN) = "ebiso" && $(basename ${UEFI_BOOTLOADER}) = "elilo.efi" ]]; then
++    Log "ebiso is used where kernel and initrd are already included in virtual image of ISO, skipping copying kernel and initrd"
++else
++    Log "Copying kernel and initrd"
++    cp -pL $v $KERNEL_FILE $TMP_DIR/isofs/isolinux/kernel || Error "Failed to copy KERNEL_FILE '$KERNEL_FILE'"
++    cp $v $TMP_DIR/$REAR_INITRD_FILENAME $TMP_DIR/isofs/isolinux/$REAR_INITRD_FILENAME || Error "Failed to copy initrd '$REAR_INITRD_FILENAME'"
++fi
++
++#ISO_FILES+=( $TMP_DIR/kernel $TMP_DIR/$REAR_INITRD_FILENAME )
++# in case the user populates this array manually we must not forget to copy
++# these files to our temporary isofs
++if test "${#ISO_FILES[@]}" -gt 0 ; then
++    cp -pL $v "${ISO_FILES[@]}" $TMP_DIR/isofs/isolinux/ || Error "Failed to copy ISO_FILES ${ISO_FILES[*]}"
++fi
++
++mkdir -p $v "$ISO_DIR" || Error "Failed to create ISO_DIR '$ISO_DIR'"
++
+diff --git a/usr/share/rear/output/ISO/Linux-arm/810_prepare_multiple_iso.sh b/usr/share/rear/output/ISO/Linux-arm/810_prepare_multiple_iso.sh
+new file mode 120000
+index 000000000..04f8a4955
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/810_prepare_multiple_iso.sh
+@@ -0,0 +1 @@
++../Linux-i386/810_prepare_multiple_iso.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/output/ISO/Linux-arm/820_create_iso_image.sh b/usr/share/rear/output/ISO/Linux-arm/820_create_iso_image.sh
+new file mode 100644
+index 000000000..37842e018
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/820_create_iso_image.sh
+@@ -0,0 +1,40 @@
++# Based on output/ISO/Linux-i386/820_create_iso_image.sh with the support
++# for non-EFI machines removed.
++
++is_true $EFI_STUB && return 0
++
++Log "Starting '$ISO_MKISOFS_BIN'"
++LogPrint "Making ISO image"
++
++is_true $USING_UEFI_BOOTLOADER || Error "OUTPUT=ISO on Linux-arm works only with UEFI"
++if [ -f /etc/slackware-version ] ; then
++    # slackware mkisofs uses different command line options
++    EFIBOOT="-eltorito-alt-boot -no-emul-boot -eltorito-platform efi -eltorito-boot boot/efiboot.img"
++else
++    EFIBOOT="-eltorito-alt-boot -e boot/efiboot.img -no-emul-boot"
++fi
++
++pushd $TMP_DIR/isofs >/dev/null
++
++# Error out when files greater or equal ISO_FILE_SIZE_LIMIT should be included in the ISO (cf. default.conf).
++# Consider all regular files and follow symbolic links to also get regular files where symlinks point to:
++assert_ISO_FILE_SIZE_LIMIT $( find -L . -type f )
++
++# ebiso uses different command line options and parameters:
++if test "ebiso" = $( basename $ISO_MKISOFS_BIN ) ; then
++    $ISO_MKISOFS_BIN $ISO_MKISOFS_OPTS -R -o $ISO_DIR/$ISO_PREFIX.iso -e boot/efiboot.img .
++else
++    $ISO_MKISOFS_BIN $v $ISO_MKISOFS_OPTS -o "$ISO_DIR/$ISO_PREFIX.iso" -no-emul-boot \
++        -R -J -volid "$ISO_VOLID" $EFIBOOT -v -iso-level 3 .  >/dev/null
++        ##-R -J -volid "$ISO_VOLID" $EFIBOOT  "${ISO_FILES[@]}"  >/dev/null
++fi
++StopIfError "Could not create ISO image (with $ISO_MKISOFS_BIN)"
++popd >/dev/null
++
++iso_image_size=( $(du -h "$ISO_DIR/$ISO_PREFIX.iso") )
++LogPrint "Wrote ISO image: $ISO_DIR/$ISO_PREFIX.iso ($iso_image_size)"
++
++# Add ISO image to result files
++RESULT_FILES+=( "$ISO_DIR/$ISO_PREFIX.iso" )
++
++# vim: set et ts=4 sw=4:
+diff --git a/usr/share/rear/output/ISO/Linux-arm/830_create_iso_image_EFISTUB.sh b/usr/share/rear/output/ISO/Linux-arm/830_create_iso_image_EFISTUB.sh
+new file mode 100644
+index 000000000..83c2d1eeb
+--- /dev/null
++++ b/usr/share/rear/output/ISO/Linux-arm/830_create_iso_image_EFISTUB.sh
+@@ -0,0 +1,25 @@
++# Based on output/ISO/Linux-i386/830_create_iso_image_EFISTUB.sh with the
++# support for non-EFI machines removed.
++
++is_true $EFI_STUB || return 0
++
++Log "EFI_STUB: Starting '$ISO_MKISOFS_BIN'"
++LogPrint "EFI_STUB: Making ISO image"
++
++pushd $TMP_DIR/isofs >/dev/null
++
++# Error out when files greater or equal ISO_FILE_SIZE_LIMIT should be included in the ISO (cf. default.conf).
++# Consider all regular files and follow symbolic links to also get regular files where symlinks point to:
++assert_ISO_FILE_SIZE_LIMIT $( find -L . -type f )
++
++$ISO_MKISOFS_BIN $v $ISO_MKISOFS_OPTS -o "$ISO_DIR/$ISO_PREFIX.iso" -no-emul-boot \
++    -R -J -volid "$ISO_VOLID" -v -iso-level 3 .  >/dev/null
++
++StopIfError "EFI_STUB: Could not create ISO image (with $ISO_MKISOFS_BIN)"
++popd >/dev/null
++
++iso_image_size=( $(du -h "$ISO_DIR/$ISO_PREFIX.iso") )
++LogPrint "EFI_STUB: Wrote ISO image: $ISO_DIR/$ISO_PREFIX.iso ($iso_image_size)"
++
++# Add ISO image to result files
++RESULT_FILES+=( "$ISO_DIR/$ISO_PREFIX.iso" )
+diff --git a/usr/share/rear/output/ISO/Linux-i386/250_populate_efibootimg.sh b/usr/share/rear/output/ISO/Linux-i386/250_populate_efibootimg.sh
+index 74ed1df3a..141cfbeae 100644
+--- a/usr/share/rear/output/ISO/Linux-i386/250_populate_efibootimg.sh
++++ b/usr/share/rear/output/ISO/Linux-i386/250_populate_efibootimg.sh
+@@ -15,7 +15,7 @@ mkdir $v -p $efi_boot_tmp_dir/locale || Error "Could not create $efi_boot_tmp_di
+ 
+ # Copy the grub*.efi executable to EFI/BOOT/BOOTX64.efi
+ # Intentionally an empty UEFI_BOOTLOADER results an invalid "cp -v /tmp/.../mnt/EFI/BOOT/BOOTX64.efi" command that fails:
+-cp $v "$UEFI_BOOTLOADER" $efi_boot_tmp_dir/BOOTX64.efi || Error "Could not find UEFI_BOOTLOADER '$UEFI_BOOTLOADER'"
++cp $v "$UEFI_BOOTLOADER" $efi_boot_tmp_dir/BOOT$EFI_ARCH_UPPER.efi || Error "Could not find UEFI_BOOTLOADER '$UEFI_BOOTLOADER'"
+ local uefi_bootloader_dirname="$( dirname $UEFI_BOOTLOADER )"
+ if test -f "$SECURE_BOOT_BOOTLOADER" ; then
+     # FIXME: Explain why it tests that a SECURE_BOOT_BOOTLOADER file exists
+@@ -52,7 +52,7 @@ if test "ebiso" = "$( basename $ISO_MKISOFS_BIN )" ; then
+ fi
+ 
+ if [[ -n "$(type -p grub)" ]]; then
+-    cat > $efi_boot_tmp_dir/BOOTX64.conf << EOF
++    cat > $efi_boot_tmp_dir/BOOT$EFI_ARCH_UPPER.conf << EOF
+ default=0
+ timeout 5
+ splashimage=/EFI/BOOT/splash.xpm.gz
+@@ -70,9 +70,9 @@ fi
+ # We are not able to create signed boot loader
+ # so we need to reuse existing one.
+ # See issue #1374
+-# build_bootx86_efi () can be safely used for other scenarios.
++# build_boot_efi () can be safely used for other scenarios.
+ if ! test -f "$SECURE_BOOT_BOOTLOADER" ; then
+-    build_bootx86_efi $TMP_DIR/mnt/EFI/BOOT/BOOTX64.efi $efi_boot_tmp_dir/grub.cfg "$boot_dir" "$UEFI_BOOTLOADER"
++    build_boot_efi $TMP_DIR/mnt/EFI/BOOT/BOOT$EFI_ARCH_UPPER.efi $efi_boot_tmp_dir/grub.cfg "$boot_dir" "$UEFI_BOOTLOADER"
+ fi
+ 
+ # We will be using grub-efi or grub2 (with efi capabilities) to boot from ISO.
+@@ -111,7 +111,7 @@ cp $v -r $TMP_DIR/mnt/EFI $TMP_DIR/isofs/ || Error "Could not create the isofs/E
+ # Make /boot/grub/grub.cfg available on isofs/
+ mkdir $v -p -m 755 $TMP_DIR/isofs/boot/grub
+ if test "$( type -p grub )" ; then
+-    cp $v $TMP_DIR/isofs/EFI/BOOT/BOOTX64.conf $TMP_DIR/isofs/boot/grub/ || Error "Could not copy EFI/BOOT/BOOTX64.conf to isofs/boot/grub"
++    cp $v $TMP_DIR/isofs/EFI/BOOT/BOOT$EFI_ARCH_UPPER.conf $TMP_DIR/isofs/boot/grub/ || Error "Could not copy EFI/BOOT/BOOT${EFI_ARCH_UPPER}.conf to isofs/boot/grub"
+ else
+     cp $v $TMP_DIR/isofs/EFI/BOOT/grub.cfg $TMP_DIR/isofs/boot/grub/ || Error "Could not copy EFI/BOOT/grub.cfg to isofs/boot/grub"
+ fi
+diff --git a/usr/share/rear/output/ISO/Linux-i386/260_EFISTUB_populate.sh b/usr/share/rear/output/ISO/Linux-i386/260_EFISTUB_populate.sh
+index a91264494..3c2380d8b 100644
+--- a/usr/share/rear/output/ISO/Linux-i386/260_EFISTUB_populate.sh
++++ b/usr/share/rear/output/ISO/Linux-i386/260_EFISTUB_populate.sh
+@@ -33,7 +33,7 @@ else
+     Error "EFI_STUB: EFI executable $OUTPUT_EFISTUB_SYSTEMD_BOOTLOADER not found"
+ fi
+ 
+-cp $v "$OUTPUT_EFISTUB_SYSTEMD_BOOTLOADER" $efi_boot_tmp_dir/BOOTX64.efi
++cp $v "$OUTPUT_EFISTUB_SYSTEMD_BOOTLOADER" $efi_boot_tmp_dir/BOOT${EFI_ARCH_UPPER}.efi
+ 
+ 
+ # Create boot menu entries for systemd-bootx64.efi.
+diff --git a/usr/share/rear/output/RAWDISK/Linux-i386/260_create_syslinux_efi_bootloader.sh b/usr/share/rear/output/RAWDISK/Linux-i386/260_create_syslinux_efi_bootloader.sh
+index cca8caf6b..155f433c9 100644
+--- a/usr/share/rear/output/RAWDISK/Linux-i386/260_create_syslinux_efi_bootloader.sh
++++ b/usr/share/rear/output/RAWDISK/Linux-i386/260_create_syslinux_efi_bootloader.sh
+@@ -33,7 +33,7 @@ local efi_boot_directory="$RAWDISK_BOOT_EFI_STAGING_ROOT/BOOT"
+ 
+ mkdir $v -p "$efi_boot_directory" || Error "Could not create $efi_boot_directory"
+ 
+-cp $v "$syslinux_efi" "$efi_boot_directory/BOOTX64.EFI" >&2
++cp $v "$syslinux_efi" "$efi_boot_directory/BOOT${EFI_ARCH_UPPER}.EFI" >&2
+ cp $v "$ldlinux_e64" "$efi_boot_directory" >&2
+ 
+ 
+diff --git a/usr/share/rear/output/RAWDISK/Linux-i386/270_create_grub2_efi_bootloader.sh b/usr/share/rear/output/RAWDISK/Linux-i386/270_create_grub2_efi_bootloader.sh
+index 8b543d8c8..0dbf17547 100644
+--- a/usr/share/rear/output/RAWDISK/Linux-i386/270_create_grub2_efi_bootloader.sh
++++ b/usr/share/rear/output/RAWDISK/Linux-i386/270_create_grub2_efi_bootloader.sh
+@@ -21,7 +21,7 @@ fi
+ # cf. https://github.com/rear/rear/issues/2338#issuecomment-594432946
+ local efi_modules_directory
+ local dir
+-for dir in /usr/lib/grub/x86_64-efi /usr/lib/grub2/x86_64-efi /usr/share/grub2/x86_64-efi; do
++for dir in "/usr/lib/grub/$GRUB2_IMAGE_FORMAT" "/usr/lib/grub2/$GRUB2_IMAGE_FORMAT" "/usr/share/grub2/$GRUB2_IMAGE_FORMAT"; do
+     if [[ -d "$dir" ]]; then
+         efi_modules_directory="$dir"
+         break
+@@ -71,10 +71,10 @@ if [[ -n "$SECURE_BOOT_BOOTLOADER" ]]; then
+     # If /boot/$grub2_name exists, it contains additional Grub modules, which are not compiled into the grub core image.
+     # Pick required ones from there, too.
+     local additional_grub_directory="/boot/$grub2_name"
+-    local grub_modules_directory="x86_64-efi"
++    local grub_modules_directory="$GRUB2_IMAGE_FORMAT"
+     local additional_grub_modules=( all_video.mod )
+     if [[ -d "$additional_grub_directory/$grub_modules_directory" ]]; then
+-        local grub_target_directory="$(dirname "$(find "$RAWDISK_BOOT_EFI_STAGING_ROOT" -iname grubx64.efi -print)")"
++        local grub_target_directory="$(dirname "$(find "$RAWDISK_BOOT_EFI_STAGING_ROOT" -iname grub${EFI_ARCH}.efi -print)")"
+         [[ "$grub_target_directory" == "." ]] && Error "Could not find Grub executable"  # dirname "" returns "."
+ 
+         mkdir "$grub_target_directory/$grub_modules_directory" || Error "Could not create Grub modules directory"
+@@ -102,9 +102,9 @@ else
+ 
+     # Create a Grub 2 EFI core image and install it as boot loader. (NOTE: This version will not be signed.)
+     # Use the UEFI default boot loader name, so that firmware will find it without an existing boot entry.
+-    local boot_loader="$efi_boot_directory/BOOTX64.EFI"
++    local boot_loader="$efi_boot_directory/BOOT${EFI_ARCH_UPPER}.EFI"
+     local grub_modules=( part_gpt fat normal configfile linux video all_video )
+     [[ -f "$efi_modules_directory/linuxefi.mod" ]] && grub_modules+=("$efi_modules_directory/linuxefi.mod")
+-    $grub2_name-mkimage -O x86_64-efi -o "$boot_loader" -p "/EFI/BOOT" "${grub_modules[@]}"
++    $grub2_name-mkimage -O "$GRUB2_IMAGE_FORMAT" -o "$boot_loader" -p "/EFI/BOOT" "${grub_modules[@]}"
+     StopIfError "Error occurred during $grub2_name-mkimage of $boot_loader"
+ fi
+diff --git a/usr/share/rear/output/USB/Linux-arm/100_create_efiboot.sh b/usr/share/rear/output/USB/Linux-arm/100_create_efiboot.sh
+new file mode 120000
+index 000000000..3846131fb
+--- /dev/null
++++ b/usr/share/rear/output/USB/Linux-arm/100_create_efiboot.sh
+@@ -0,0 +1 @@
++../Linux-i386/100_create_efiboot.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/output/USB/Linux-i386/100_create_efiboot.sh b/usr/share/rear/output/USB/Linux-i386/100_create_efiboot.sh
+index fd631c444..cfcd001d7 100644
+--- a/usr/share/rear/output/USB/Linux-i386/100_create_efiboot.sh
++++ b/usr/share/rear/output/USB/Linux-i386/100_create_efiboot.sh
+@@ -51,8 +51,8 @@ if test -f "$SECURE_BOOT_BOOTLOADER" ; then
+     # (cf. rescue/default/850_save_sysfs_uefi_vars.sh)
+     # then Shim (usually shim.efi) must be copied as EFI/BOOT/BOOTX64.efi
+     # and Shim's second stage bootloader must be also copied where Shim already is.
+-    DebugPrint "Using '$SECURE_BOOT_BOOTLOADER' as first stage Secure Boot bootloader BOOTX64.efi"
+-    cp -L $v "$SECURE_BOOT_BOOTLOADER" "$EFI_DST/BOOTX64.efi" || Error "Failed to copy SECURE_BOOT_BOOTLOADER '$SECURE_BOOT_BOOTLOADER' to $EFI_DST/BOOTX64.efi"
++    DebugPrint "Using '$SECURE_BOOT_BOOTLOADER' as first stage Secure Boot bootloader BOOT${EFI_ARCH_UPPER}.efi"
++    cp -L $v "$SECURE_BOOT_BOOTLOADER" "$EFI_DST/BOOT${EFI_ARCH_UPPER}.efi" || Error "Failed to copy SECURE_BOOT_BOOTLOADER '$SECURE_BOOT_BOOTLOADER' to $EFI_DST/BOOT${EFI_ARCH_UPPER}.efi"
+     # When Shim is used, its second stage bootloader can be actually anything
+     # named grub*.efi (second stage bootloader is Shim compile time option), see
+     # http://www.rodsbooks.com/efi-bootloaders/secureboot.html#initial_shim
+@@ -65,9 +65,8 @@ if test -f "$SECURE_BOOT_BOOTLOADER" ; then
+     DebugPrint "Using second stage Secure Boot bootloader files: $second_stage_UEFI_bootloader_files"
+     cp -L $v $second_stage_UEFI_bootloader_files $EFI_DST/ || Error "Failed to copy second stage Secure Boot bootloader files"
+ else
+-    cp -L $v "$UEFI_BOOTLOADER" "$EFI_DST/BOOTX64.efi" || Error "Failed to copy UEFI_BOOTLOADER '$UEFI_BOOTLOADER' to $EFI_DST/BOOTX64.efi"
++    cp -L $v "$UEFI_BOOTLOADER" "$EFI_DST/BOOT${EFI_ARCH_UPPER}.efi" || Error "Failed to copy UEFI_BOOTLOADER '$UEFI_BOOTLOADER' to $EFI_DST/BOOT${EFI_ARCH_UPPER}.efi"
+ fi
+-cp $v $UEFI_BOOTLOADER "$EFI_DST/BOOTX64.efi" || Error "Failed to copy UEFI_BOOTLOADER '$UEFI_BOOTLOADER' to $EFI_DST/BOOTX64.efi"
+ 
+ # Copy kernel
+ cp -pL $v "$KERNEL_FILE" "$EFI_DST/kernel" || Error "Failed to copy KERNEL_FILE '$KERNEL_FILE' to $EFI_DST/kernel"
+@@ -109,7 +108,7 @@ else
+                 Log "Configuring grub 0.97 for EFI boot"
+ 
+                 # Create config for grub 0.97
+-                cat > ${EFI_DST}/BOOTX64.conf << EOF
++            cat > ${EFI_DST}/BOOT${EFI_ARCH_UPPER}.conf << EOF
+ default=0
+ timeout=5
+ 
+@@ -117,7 +116,7 @@ title Relax-and-Recover (no Secure Boot)
+     kernel ${EFI_DIR}/kernel $KERNEL_CMDLINE
+     initrd ${EFI_DIR}/$REAR_INITRD_FILENAME
+ EOF
+-            ;;
++        ;;
+             2)
+                 Log "Configuring grub 2.0 for EFI boot"
+                 # We need to explicitly set $root variable to $EFI_LABEL
+@@ -128,22 +127,22 @@ EOF
+                 grub2_set_usb_root="search --no-floppy --set=root --label ${EFI_LABEL}"
+ 
+                 # Create config for grub 2.0
+-                create_grub2_cfg ${EFI_DIR}/kernel ${EFI_DIR}/$REAR_INITRD_FILENAME > ${EFI_DST}/grub.cfg
++            create_grub2_cfg ${EFI_DIR}/kernel ${EFI_DIR}/$REAR_INITRD_FILENAME > ${EFI_DST}/grub.cfg
+ 
+                 # Create bootloader, this overwrite BOOTX64.efi copied in previous step ...
+-                # Create BOOTX86.efi but only if we are NOT secure booting.
+-                # We are not able to create signed boot loader
+-                # so we need to reuse existing one.
+-                # See issue #1374
+-                # build_bootx86_efi () can be safely used for other scenarios.
+-                if ! test -f "$SECURE_BOOT_BOOTLOADER" ; then
+-                    build_bootx86_efi ${EFI_DST}/BOOTX64.efi ${EFI_DST}/grub.cfg "/boot" "$UEFI_BOOTLOADER"
+-                fi
+-            ;;
++            # Create BOOTX86.efi but only if we are NOT secure booting.
++            # We are not able to create signed boot loader
++            # so we need to reuse existing one.
++            # See issue #1374
++            # build_boot_efi () can be safely used for other scenarios.
++            if ! test -f "$SECURE_BOOT_BOOTLOADER" ; then
++                build_boot_efi $EFI_DST/BOOT$EFI_ARCH_UPPER.efi $EFI_DST/grub.cfg "/boot" "$UEFI_BOOTLOADER"
++            fi
++        ;;
+             *)
+                 BugError "Neither grub 0.97 nor 2.0"
+-            ;;
+-        esac
++        ;;
++    esac
+     else
+         BugIfError "Unknown EFI bootloader"
+     fi
+diff --git a/usr/share/rear/output/USB/Linux-i386/300_create_extlinux.sh b/usr/share/rear/output/USB/Linux-i386/300_create_extlinux.sh
+index 47c7dc80c..3bbb66e2b 100644
+--- a/usr/share/rear/output/USB/Linux-i386/300_create_extlinux.sh
++++ b/usr/share/rear/output/USB/Linux-i386/300_create_extlinux.sh
+@@ -95,12 +95,6 @@ case "$WORKFLOW" in
+     (*) BugError "Workflow $WORKFLOW should not run this script."
+ esac
+ 
+-USB_REAR_DIR="$BUILD_DIR/outputfs/$USB_PREFIX"
+-if [ ! -d "$USB_REAR_DIR" ]; then
+-    mkdir -p $v "$USB_REAR_DIR" >/dev/null
+-    StopIfError "Could not create USB ReaR dir [$USB_REAR_DIR] !"
+-fi
+-
+ # We generate a single syslinux.cfg for the current system
+ Log "Creating $USB_PREFIX/syslinux.cfg"
+ # FIXME: # type -a time
+diff --git a/usr/share/rear/output/USB/default/200_make_usb_prefix_dir.sh b/usr/share/rear/output/USB/default/200_make_usb_prefix_dir.sh
+new file mode 100644
+index 000000000..3c8ff6e6c
+--- /dev/null
++++ b/usr/share/rear/output/USB/default/200_make_usb_prefix_dir.sh
+@@ -0,0 +1,8 @@
++# The $BUILD_DIR/outputfs/$USB_PREFIX directory is needed by subsequent scripts
++# like output/USB/default/830_copy_kernel_initrd.sh to store kernel and initrd
++# and for parts of the syslinux config in 'syslinux.cfg' if syslinux/extlinux is used
++
++USB_REAR_DIR="$BUILD_DIR/outputfs/$USB_PREFIX"
++if [ ! -d "$USB_REAR_DIR" ] ; then
++    mkdir -p $v "$USB_REAR_DIR" || Error "Failed to create USB ReaR dir '$usb_rear_dir'"
++fi
+diff --git a/usr/share/rear/output/USB/Linux-i386/830_copy_kernel_initrd.sh b/usr/share/rear/output/USB/default/830_copy_kernel_initrd.sh
+similarity index 100%
+rename from usr/share/rear/output/USB/Linux-i386/830_copy_kernel_initrd.sh
+rename to usr/share/rear/output/USB/default/830_copy_kernel_initrd.sh
+diff --git a/usr/share/rear/output/default/940_grub2_rescue.sh b/usr/share/rear/output/default/940_grub2_rescue.sh
+index 38e816389..af09ca381 100644
+--- a/usr/share/rear/output/default/940_grub2_rescue.sh
++++ b/usr/share/rear/output/default/940_grub2_rescue.sh
+@@ -173,7 +173,8 @@ if is_true $USING_UEFI_BOOTLOADER ; then
+     ) > $grub_config_dir/rear.cfg
+ 
+     # Create rear.efi at UEFI default boot directory location.
+-    build_bootx86_efi $boot_dir/efi/EFI/BOOT/rear.efi $grub_config_dir/rear.cfg "$boot_dir" "$UEFI_BOOTLOADER"
++    # The build_boot_efi errors out if it cannot make a bootable EFI image of GRUB2:
++    build_boot_efi $boot_dir/efi/EFI/BOOT/rear.efi $grub_config_dir/rear.cfg "$boot_dir" "$UEFI_BOOTLOADER"
+ 
+     # If UEFI boot entry for "Relax-and-Recover" does not exist, create it.
+     # This will also add "Relax-and-Recover" to boot order because if UEFI entry is not listed in BootOrder,
+diff --git a/usr/share/rear/prep/Linux-arm/060_check_config.sh b/usr/share/rear/prep/Linux-arm/060_check_config.sh
+deleted file mode 100644
+index ca0978a12..000000000
+--- a/usr/share/rear/prep/Linux-arm/060_check_config.sh
++++ /dev/null
+@@ -1,3 +0,0 @@
+-if [ "$OUTPUT" != "PXE" ] ; then
+-    Error "Currently only OUTPUT=PXE is supported on ARM"
+-fi
+diff --git a/usr/share/rear/prep/Linux-arm/330_set_efi_arch.sh b/usr/share/rear/prep/Linux-arm/330_set_efi_arch.sh
+new file mode 100644
+index 000000000..2dfd82d24
+--- /dev/null
++++ b/usr/share/rear/prep/Linux-arm/330_set_efi_arch.sh
+@@ -0,0 +1,21 @@
++
++# Set EFI architecture, used as suffix for various files in the ESP
++# See https://github.com/rhboot/shim/blob/main/Make.defaults
++
++# Set the variables even if USING_UEFI_BOOTLOADER empty or no explicit 'true' value
++# cf. prep/Linux-i386/330_set_efi_arch.sh
++
++case "$REAL_MACHINE" in
++    (arm64|aarch64)
++        EFI_ARCH=aa64
++        GRUB2_IMAGE_FORMAT=arm64-efi
++        ;;
++    (arm*)
++        EFI_ARCH=arm
++        GRUB2_IMAGE_FORMAT=arm-efi
++        ;;
++    (*)
++        BugError "Unknown architecture $REAL_MACHINE"
++esac
++
++EFI_ARCH_UPPER="${EFI_ARCH^^}"
+diff --git a/usr/share/rear/prep/Linux-i386/330_set_efi_arch.sh b/usr/share/rear/prep/Linux-i386/330_set_efi_arch.sh
+new file mode 100644
+index 000000000..51a320767
+--- /dev/null
++++ b/usr/share/rear/prep/Linux-i386/330_set_efi_arch.sh
+@@ -0,0 +1,32 @@
++
++# Set EFI architecture, used as suffix for various files in the ESP
++# See https://github.com/rhboot/shim/blob/main/Make.defaults
++
++# Set the variables even if USING_UEFI_BOOTLOADER empty or no explicit 'true' value
++# which sets GRUB2_IMAGE_FORMAT (used as argument for 'grub-mkstandalone -O ...')
++# to a value for EFI systems ('x86_64-efi' or 'i386-efi') also on BIOS systems
++# but that does not matter for now because currently GRUB2_IMAGE_FORMAT
++# is only used in case of EFI in the scripts lib/uefi-functions.sh
++# and output/RAWDISK/Linux-i386/270_create_grub2_efi_bootloader.sh
++# see https://github.com/rear/rear/pull/3157
++# and https://github.com/rear/rear/issues/3191
++# and https://github.com/rear/rear/issues/3195
++
++case "$REAL_MACHINE" in
++    # cf. the seting of REAL_MACHINE ('uname -m') and MACHINE in default.conf
++    (i686|i586|i386)
++        # all these behave exactly like i386.
++        # ia32 is another name for i386, used by EFI
++        # (but ia64 is not x86_64 aka amd64, it is the architecture of Itanium)
++        EFI_ARCH=ia32
++        GRUB2_IMAGE_FORMAT=i386-efi
++        ;;
++    (x86_64)
++        EFI_ARCH=x64
++        GRUB2_IMAGE_FORMAT=x86_64-efi
++        ;;
++    (*)
++        BugError "Unknown architecture $REAL_MACHINE"
++esac
++
++EFI_ARCH_UPPER="${EFI_ARCH^^}"
+diff --git a/usr/share/rear/prep/Linux-ia64/330_set_efi_arch.sh b/usr/share/rear/prep/Linux-ia64/330_set_efi_arch.sh
+new file mode 100644
+index 000000000..668a3262e
+--- /dev/null
++++ b/usr/share/rear/prep/Linux-ia64/330_set_efi_arch.sh
+@@ -0,0 +1,12 @@
++
++# Set EFI architecture, used as suffix for various files in the ESP
++# See https://github.com/rhboot/shim/blob/main/Make.defaults
++
++# Set the variables even if USING_UEFI_BOOTLOADER empty or no explicit 'true' value
++# cf. prep/Linux-i386/330_set_efi_arch.sh
++
++EFI_ARCH=ia64
++# argument for grub2-mkstandalone -O ...
++GRUB2_IMAGE_FORMAT=ia64-efi
++
++EFI_ARCH_UPPER="${EFI_ARCH^^}"
+diff --git a/usr/share/rear/prep/USB/Linux-arm/350_safeguard_error_out.sh b/usr/share/rear/prep/USB/Linux-arm/350_safeguard_error_out.sh
+deleted file mode 120000
+index 49a162aeb..000000000
+--- a/usr/share/rear/prep/USB/Linux-arm/350_safeguard_error_out.sh
++++ /dev/null
+@@ -1 +0,0 @@
+-../Linux-ppc64/350_safeguard_error_out.sh
+\ No newline at end of file
+diff --git a/usr/share/rear/prep/USB/Linux-ppc64/350_safeguard_error_out.sh b/usr/share/rear/prep/USB/Linux-ppc64/350_safeguard_error_out.sh
+index 412014ea3..6b56a5dee 100644
+--- a/usr/share/rear/prep/USB/Linux-ppc64/350_safeguard_error_out.sh
++++ b/usr/share/rear/prep/USB/Linux-ppc64/350_safeguard_error_out.sh
+@@ -27,10 +27,6 @@
+ # OUTPUT=USB on IBM Z (s390/s390x) architecture:
+ # The symbolic link prep/USB/Linux-s390/350_safeguard_error_out.sh
+ # and its link target prep/USB/Linux-ppc64/350_safeguard_error_out.sh
+-#
+-# OUTPUT=USB on ARM architecture:
+-# The symbolic link prep/USB/Linux-arm/350_safeguard_error_out.sh
+-# and its link target prep/USB/Linux-ppc64/350_safeguard_error_out.sh
+ 
+ Error "OUTPUT=USB not supported on $ARCH (no support to install a bootloader)"
+ 
+diff --git a/usr/share/rear/rescue/default/850_save_sysfs_uefi_vars.sh b/usr/share/rear/rescue/default/850_save_sysfs_uefi_vars.sh
+index 678b9c598..8e4f902d3 100644
+--- a/usr/share/rear/rescue/default/850_save_sysfs_uefi_vars.sh
++++ b/usr/share/rear/rescue/default/850_save_sysfs_uefi_vars.sh
+@@ -55,11 +55,11 @@ for dummy in "once" ; do
+     UEFI_BOOTLOADER=$( find /boot/efi -name 'elilo.efi' | tail -1 )
+     test -f "$UEFI_BOOTLOADER" && continue
+     # In case we have a 64-bit systemd bootloader we might be lucky with next statement:
+-    UEFI_BOOTLOADER=$( find /boot/EFI -name 'BOOTX64.EFI' | tail -1 )
++    UEFI_BOOTLOADER=$( find /boot/EFI -name "BOOT${EFI_ARCH_UPPER}.EFI" | tail -1 )
+     test -f "$UEFI_BOOTLOADER" && continue
+     # Try more generic finds in whole /boot with case insensitive filename matching.
+     # On older systems where 'find' does not support '-iname' this does not make it really worse because there 'find' just fails.
+-    for find_name_pattern in 'grub*.efi' 'elilo.efi' 'BOOTX64.EFI' ; do
++    for find_name_pattern in 'grub*.efi' 'elilo.efi' "BOOT${EFI_ARCH_UPPER}.EFI" ; do
+         # No need to test if find_name_pattern is empty because 'find' does not find anything with empty '-iname':
+         UEFI_BOOTLOADER=$( find /boot -iname "$find_name_pattern" | tail -1 )
+         # Continue with the code after the outer 'for' loop:

@@ -1,0 +1,15 @@
+commit 1e9e7b3c07912b3960d077e05473dfb61d3a0796
+Author: Pavel Cahyna <pcahyna@redhat.com>
+Date:   Wed Aug 13 16:30:46 2025 +0200
+
+    Error out if any unsupported OUTPUT used on s390
+
+diff --git a/usr/share/rear/prep/Linux-s390/034_check_config.sh b/usr/share/rear/prep/Linux-s390/034_check_config.sh
+new file mode 100644
+index 000000000..6c3eab289
+--- /dev/null
++++ b/usr/share/rear/prep/Linux-s390/034_check_config.sh
+@@ -0,0 +1,3 @@
++if [ "$OUTPUT" != "RAMDISK" ] && [ "$OUTPUT" != "IPL" ] ; then
++   Error "Currently, only OUTPUT=RAMDISK and OUTPUT=IPL are supported on s390/s390x"
++fi

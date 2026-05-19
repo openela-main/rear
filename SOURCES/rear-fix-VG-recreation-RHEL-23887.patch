@@ -1,0 +1,26 @@
+From 70acf6fa39b3d133c0a632e3496e5a273dc9ef27 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Renaud=20M=C3=A9trich?= <rmetrich@redhat.com>
+Date: Fri, 5 Feb 2021 13:50:42 +0100
+Subject: [PATCH] Update 110_include_lvm_code.sh
+
+Make sure we delete the volume group before re-creating it.
+The issue happens in Migration mode when ReaR is not trying to use vgcfgrestore.
+
+(cherry picked from commit 70acf6fa39b3d133c0a632e3496e5a273dc9ef27)
+---
+ usr/share/rear/layout/prepare/GNU/Linux/110_include_lvm_code.sh | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/usr/share/rear/layout/prepare/GNU/Linux/110_include_lvm_code.sh b/usr/share/rear/layout/prepare/GNU/Linux/110_include_lvm_code.sh
+index 7cfdfcf28c..1d75990849 100644
+--- a/usr/share/rear/layout/prepare/GNU/Linux/110_include_lvm_code.sh
++++ b/usr/share/rear/layout/prepare/GNU/Linux/110_include_lvm_code.sh
+@@ -140,6 +140,7 @@ EOF
+ cat >> "$LAYOUT_CODE" <<EOF
+ if IsInArray $vg "\${create_volume_group[@]}" ; then
+     LogPrint "Creating LVM VG '$vg'; Warning: some properties may not be preserved..."
++    lvm vgremove --force --force --yes $vg >&2 || true
+     if [ -e "$vgrp" ] ; then
+         rm -rf "$vgrp"
+     fi
+

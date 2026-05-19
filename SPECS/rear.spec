@@ -3,7 +3,7 @@
 
 Name: rear
 Version: 2.6
-Release: 27%{?dist}
+Release: 28%{?dist}
 Summary: Relax-and-Recover is a Linux disaster recovery and system migration tool
 URL: http://relax-and-recover.org/
 License: GPLv3
@@ -115,6 +115,40 @@ Patch126: rear-print-disk-mapping-with-sizes-RHEL-83241.patch
 # https://github.com/rear/rear/commit/9b28f14fad26ff00a6f90b13c3e4906d85f3ae3c
 Patch127: rear-support-aarch64-uefi-RHEL-56045.patch
 
+# copy an sshd helper to the rescue ramdisk, necessary on EL9.8
+# https://github.com/rear/rear/commit/bcf6669fac64d194d18b2e5360df4181002856e8
+Patch128: rear-sshd-RHEL-146037.patch
+
+# fix support for PowerNV machines without PPC PReP partitions
+# https://github.com/rear/rear/commit/79a3b50a0effcf4c1a43e9dfe1b8d0427ee0bf02
+Patch129: rear-fix-powerNV-support-RHEL-134217.patch
+
+# EL10-only
+# Patch130:
+# Patch131:
+
+# add support for dbus broker
+# https://github.com/rear/rear/commit/61d294b9635b3c71bd58409e810bccb705b1220c
+Patch132: rear-dbus-broker-RHEL-31749.patch
+
+# abort when sourcing fails due to a syntax error
+# https://github.com/rear/rear/commit/c4a7729242455cdef69f5ac3982f8d76ccc183c3
+Patch133: rear-abort-source-on-syntax-error-RHEL-104289.patch
+
+# fix recreation of multi-disk volume groups in migration mode
+# https://github.com/rear/rear/commit/acb19846599a5fc411fd8c288776e1af2d79c920
+Patch134: rear-fix-VG-recreation-RHEL-23887.patch
+
+# skip unsupported partition tables, e.g. sun
+# https://github.com/rear/rear/commit/825478ee27f916553938afaf5164fec22cb32732
+Patch135: rear-skip-unsupported-partition-tables-RHEL-78583.patch
+
+# do not attempt to use the disk with backup for recovery
+# https://github.com/rear/rear/commit/258e34a72374d512155054e2d6efa84f8f5cd974
+# https://github.com/rear/rear/commit/7e5aea79e0fe1badf7c0820e854f8ca3ac32cef0
+# https://github.com/rear/rear/commit/a5edba7551884e9201a21fc1ea33de7ca7e6cb07
+Patch136: rear-do-not-use-backup-disk-for-recovery-RHEL-111612.patch
+
 ######################
 # downstream patches #
 ######################
@@ -166,6 +200,7 @@ Requires:   s390utils-core
 # default installed bootloader yaboot is also useed to make the bootable ISO image.
 
 BuildRequires: efi-srpm-macros
+BuildRequires: git-core
 # Required for HTML user guide
 BuildRequires: make
 BuildRequires: asciidoctor
@@ -214,7 +249,7 @@ Professional services and support are available.
 
 #-- PREP, BUILD & INSTALL -----------------------------------------------------#
 %prep
-%autosetup -p1
+%autosetup -p1 -S git
 
 ### Add a specific os.conf so we do not depend on LSB dependencies
 %{?fedora:echo -e "OS_VENDOR=Fedora\nOS_VERSION=%{?fedora}" >etc/rear/os.conf}
@@ -259,6 +294,16 @@ install -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/%{name}/
 
 #-- CHANGELOG -----------------------------------------------------------------#
 %changelog
+* Thu Jan 29 2026 Lukáš Zaoral <lzaoral@redhat.com> - 2.6-28
+- use git to apply downstream patches
+- copy an sshd helper to the rescue ramdisk (RHEL-146037)
+- fix support for PowerNV machines without PPC PReP partitions (RHEL-134217)
+- add support for dbus broker (RHEL-31749)
+- abort when sourcing fails due to a syntax error (RHEL-104289)
+- fix recreation of multi-disk volume groups in migration mode (RHEL-23887)
+- skip unsupported partition tables (RHEL-78583)
+- do not attempt to use the disk with backup for recovery (RHEL-111612)
+
 * Thu Aug 14 2025 Pavel Cahyna <pcahyna@redhat.com> - 2.6-27
 - add dependency on grub2-tools-extra and GRUB EFI modules on EFI machines
 - add dependency on syslinux-extlinux on x86

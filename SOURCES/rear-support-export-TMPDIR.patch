@@ -3,8 +3,8 @@ index d2cb6c070..ea66f0a98 100755
 --- a/usr/sbin/rear
 +++ b/usr/sbin/rear
 @@ -376,6 +376,10 @@ fi
- # and fd6 to get input from the user regardless where to STDIN is redirected:
- source $SHARE_DIR/lib/_input-output-functions.sh
+     exit 1
+ fi
  
 +# Used to determine whether TMPDIR has been changed in user config.
 +# Save the current value to detect changes.
@@ -15,7 +15,7 @@ index d2cb6c070..ea66f0a98 100755
  
 @@ -446,6 +450,14 @@ for config in site local rescue ; do
          test "$( tr -d -c '\r' < $CONFIG_DIR/$config.conf )" && Error "Carriage return character in $CONFIG_DIR/$config.conf (perhaps DOS or Mac format)"
-         Source "$CONFIG_DIR/$config.conf" || true
+         Source "$CONFIG_DIR/$config.conf" || Error "Failed to Source $CONFIG_DIR/$config.conf"
      fi
 +    if [ "$config" == local ] ; then
 +        # changing TMPDIR in rescue.conf is expected for now, see

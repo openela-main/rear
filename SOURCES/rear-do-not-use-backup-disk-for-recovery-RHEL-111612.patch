@@ -1,0 +1,686 @@
+commit 258e34a72374d512155054e2d6efa84f8f5cd974
+Merge: db673c433 62a99159b
+Author: Johannes Meixner <jsmeix@suse.com>
+Date:   Fri Oct 15 12:33:19 2021 +0200
+
+    Merge pull request #2693 from rear/jsmeix-automapping-overhauled
+    
+    In layout/prepare/default/300_map_disks.sh overhauled the
+    automapping of original 'disk' devices and 'multipath' devices
+    to current block devices in the currently running recovery system
+    so that now it automatically finds an existing unique disk size mapping
+    also when there is a unique mapping between more than two disks,
+    see https://github.com/rear/rear/issues/2690
+
+(cherry-picked from commit 258e34a72374d512155054e2d6efa84f8f5cd974)
+
+diff --git a/usr/share/rear/layout/prepare/default/300_map_disks.sh b/usr/share/rear/layout/prepare/default/300_map_disks.sh
+index 2e90768cb..6756ce10e 100644
+--- a/usr/share/rear/layout/prepare/default/300_map_disks.sh
++++ b/usr/share/rear/layout/prepare/default/300_map_disks.sh
+@@ -110,6 +110,7 @@ done
+         DebugPrint "Skip automapping $orig_device with size $orig_size (already exists as source in $MAPPING_FILE)"
+         continue
+     fi
++    # The original device is not yet mapped (i.e. not used as source in the mapping file) so it needs to be mapped.
+     # First, try to find if there is a current disk with same name and same size as the original:
+     # (possibly influenced by mapping hints if known)
+     if has_mapping_hint "$orig_device" ; then
+@@ -119,25 +123,31 @@ while read keyword orig_device orig_size junk ; do
+         # The current_device (e.g. /sys/block/sda) is not a block device so that
+         # its matching actual block device (e.g. /dev/sda) must be determined:
+         preferred_target_device_name="$( get_device_name $current_device )"
+-        # Continue with next one if the current one is already used as target in the mapping file:
+-        is_mapping_target "$preferred_target_device_name" && continue
+         # Use the current one if it is of same size as the old one:
+         if has_mapping_hint "$orig_device" || test "$orig_size" -eq "$current_size" ; then
+-            # Ensure the determined target device is really a block device:
++            # Ensure the target device is really a block device on the replacement hardware.
++            # Here the target device has same name as the original device which was a block device on the original hardware
++            # but it might perhaps happen that this device name is not a block device on the replacement hardware:
+             if test -b "$preferred_target_device_name" ; then
+                 if has_mapping_hint "$orig_device" ; then
+                     mapping_reason="determined by mapping hint"
+                 else
+                     mapping_reason="same name and same size $current_size"
+                 fi
+-                add_mapping "$orig_device" "$preferred_target_device_name"
+-                LogPrint "Using $preferred_target_device_name ($mapping_reason) for recreating $orig_device"
+-                # Continue with next original device in the LAYOUT_FILE:
+-                continue
++                # Do not map if the current one is already used as target in the mapping file:
++                if is_mapping_target "$preferred_target_device_name" ; then
++                    DebugPrint "Cannot use $preferred_target_device_name ($mapping_reason) for recreating $orig_device ($preferred_target_device_name already exists as target in $MAPPING_FILE)"
++                else
++                    add_mapping "$orig_device" "$preferred_target_device_name"
++                    LogPrint "Using $preferred_target_device_name ($mapping_reason) for recreating $orig_device"
++                    # Continue with next original device because the current one is now mapped:
++                    continue
++                fi
+             fi
+         fi
+     fi
+-    # Else, loop over all current block devices to find one of the same size as the original:
++    # If there is no current disk with same name and same size as the original
++    # loop over all current block devices to find one of same size as the original:
+     for current_device_path in /sys/block/* ; do
+         # Continue with next block device if the current one has no queue directory:
+         test -d $current_device_path/queue || continue
+@@ -143,20 +153,26 @@ while read keyword orig_device orig_size junk ; do
+         # The current_device_path (e.g. /sys/block/sdb) is not a block device so that
+         # its matching actual block device (e.g. /dev/sdb) must be determined:
+         preferred_target_device_name="$( get_device_name $current_device_path )"
+-        # Continue with next one if the current one is already used as target in the mapping file:
+-        is_mapping_target "$preferred_target_device_name" && continue
+-        # Use the current one if it is of same size as the old one:
+-        if test "$orig_size" -eq "$current_size" ; then
+-            # Ensure the determined target device is really a block device:
+-            if test -b "$preferred_target_device_name" ; then
+-                add_mapping "$orig_device" "$preferred_target_device_name"
+-                LogPrint "Using $preferred_target_device_name (same size $current_size) for recreating $orig_device"
+-                # Break looping over all current block devices to find one
+-                # and continue with next original device in the LAYOUT_FILE:
+-                break
+-            fi
++        # Ensure the determined target device is really a block device (cf. above):
++        test -b "$preferred_target_device_name" || continue
++        # Continue with next current block device if the current one is not of same size as the original:
++        test "$orig_size" -eq "$current_size" || continue
++        # Continue with next current block device if the current one is already used as target in the mapping file:
++        if is_mapping_target "$preferred_target_device_name" ; then
++            DebugPrint "Cannot use $preferred_target_device_name (same size $current_size) for recreating $orig_device ($preferred_target_device_name already exists as target in $MAPPING_FILE)"
++            continue
+         fi
++        # The first of all current block devices with same size as the original that is not yet used as target gets used:
++        add_mapping "$orig_device" "$preferred_target_device_name"
++        LogPrint "Using $preferred_target_device_name (same size $current_size) for recreating $orig_device"
++        # Continue the outer while loop with next original device because the current one is now mapped:
++        continue 2
+     done
++    # The original device could not be automapped because there is
++    # neither a current disk with same name and same size as the original
++    # nor is there a current disk with different name but same size as the original
++    # so the user must maually specify the right mapping target:
++    DebugPrint "Could not automap $orig_device (no disk with same size $orig_size found)"
+ done < <( grep -E "^disk |^multipath " "$LAYOUT_FILE" )
+ 
+ # For every unmapped original 'disk' device and 'multipath' device in the LAYOUT_FILE
+commit 7e5aea79e0fe1badf7c0820e854f8ca3ac32cef0
+Merge: 357f9cdf8 a16d8ea19
+Author: Johannes Meixner <jsmeix@suse.com>
+Date:   Tue Oct 26 14:11:35 2021 +0200
+
+    Merge pull request #2626 from OliverO2/feature/stop-overwriting-backups
+    
+    Stop ReaR from overwriting its own disk and backup drives
+    for OUTPUT=USB and OUTPUT=RAWDISK via new
+    WRITE_PROTECTED_... config variables (see default.conf)
+    where UUIDs or filesystem labels can be specified so that
+    disks that contain such UUIDs or filesystem labels
+    will be 'write protected' during "rear recover",
+    see https://github.com/rear/rear/issues/1271
+
+(cherry-picked from commit 7e5aea79e0fe1badf7c0820e854f8ca3ac32cef0)
+
+diff --git a/usr/share/rear/conf/default.conf b/usr/share/rear/conf/default.conf
+index ac6e6aa17..cf2b3689b 100644
+--- a/usr/share/rear/conf/default.conf
++++ b/usr/share/rear/conf/default.conf
+@@ -525,6 +525,22 @@ AUTORESIZE_EXCLUDE_PARTITIONS=( boot swap efi )
+ AUTOSHRINK_DISK_SIZE_LIMIT_PERCENTAGE=2
+ AUTOINCREASE_DISK_SIZE_THRESHOLD_PERCENTAGE=10
+ 
++##
++# Write-protection during "rear recover"
++#
++# Designate target disk devices or partitions as write-protected
++# to avoid being accidentally overwritten during "rear recover".
++#
++# List of partition table UUIDs, which designate write-protected disk devices.
++# ReaR's own disk device will be automatically added to this list if necessary.
++# Example: WRITE_PROTECTED_PARTITION_TABLE_UUIDS+=("ecacbce4-e05e-4eb9-835c-ade0c3ed0fea")
++WRITE_PROTECTED_PARTITION_TABLE_UUIDS=()
++#
++# List of (shell glob) patterns, which designate matching file system labels as write-protected partitions.
++# Entries may be quoted and contain blanks, but they may not contain single quotes themselves.
++# Example: WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS+=("Backup *")
++WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS=()
++
+ ##
+ # Creating XFS filesystems during "rear recover"
+ #
+diff --git a/usr/share/rear/layout/prepare/default/250_compare_disks.sh b/usr/share/rear/layout/prepare/default/250_compare_disks.sh
+index c459b9286..49dadb3e5 100644
+--- a/usr/share/rear/layout/prepare/default/250_compare_disks.sh
++++ b/usr/share/rear/layout/prepare/default/250_compare_disks.sh
+@@ -79,6 +79,8 @@ if ! is_true "$MIGRATION_MODE" ; then
+         is_multipath_path ${current_device_path#/sys/block/} && continue
+         # Continue with next block device if the current one has no queue directory:
+         test -d $current_device_path/queue || continue
++        # Continue with next block device if the current one is designated as write-protected
++        is_write_protected $current_device_path && continue
+         # Continue with next block device if no size can be read for the current one:
+         test -r $current_device_path/size || continue
+         current_disk_name="${current_device_path#/sys/block/}"
+@@ -116,7 +118,12 @@ if ! is_true "$MIGRATION_MODE" ; then
+             Log "Device /sys/block/$dev exists"
+             newsize=$( get_disk_size $dev )
+             if test "$newsize" -eq "$size" ; then
+-                LogPrint "Device $dev has expected (same) size $size bytes (will be used for '$WORKFLOW')"
++                if is_write_protected "/sys/block/$dev"; then
++                    LogPrint "Device $dev is designated as write-protected (needs manual configuration)"
++                    MIGRATION_MODE='true'
++                else
++                    LogPrint "Device $dev has expected (same) size $size bytes (will be used for '$WORKFLOW')"
++                fi
+             elif test "$( get_mapping_hint $devnode )" == "$devnode" ; then
+                 Debug "Found identical mapping hint ${devnode} -> ${devnode}"
+                 LogPrint "Device $dev found according to mapping hints (will be used for '$WORKFLOW')"
+diff --git a/usr/share/rear/layout/prepare/default/300_map_disks.sh b/usr/share/rear/layout/prepare/default/300_map_disks.sh
+index 6756ce10e..7e879470f 100644
+--- a/usr/share/rear/layout/prepare/default/300_map_disks.sh
++++ b/usr/share/rear/layout/prepare/default/300_map_disks.sh
+@@ -133,10 +133,15 @@ while read keyword orig_device orig_size junk ; do
+                 if is_mapping_target "$preferred_target_device_name" ; then
+                     DebugPrint "Cannot use $preferred_target_device_name ($mapping_reason) for recreating $orig_device ($preferred_target_device_name already exists as target in $MAPPING_FILE)"
+                 else
+-                    add_mapping "$orig_device" "$preferred_target_device_name"
+-                    LogPrint "Using $preferred_target_device_name ($mapping_reason) for recreating $orig_device"
+-                    # Continue with next original device because the current one is now mapped:
+-                    continue
++                    # Ensure the determined target device is not write-protected:
++                    if is_write_protected "$preferred_target_device_name" ; then
++                        DebugPrint "Cannot use $preferred_target_device_name ($mapping_reason) for recreating $orig_device ($preferred_target_device_name is write-protected)"
++                    else
++                        add_mapping "$orig_device" "$preferred_target_device_name"
++                        LogPrint "Using $preferred_target_device_name ($mapping_reason) for recreating $orig_device"
++                        # Continue with next original device because the current one is now mapped:
++                        continue
++                    fi
+                 fi
+             fi
+         fi
+@@ -162,6 +167,11 @@ while read keyword orig_device orig_size junk ; do
+             DebugPrint "Cannot use $preferred_target_device_name (same size $current_size) for recreating $orig_device ($preferred_target_device_name already exists as target in $MAPPING_FILE)"
+             continue
+         fi
++        # Ensure the determined target device is not write-protected (cf. above):
++        if is_write_protected "$preferred_target_device_name" ; then
++            DebugPrint "Cannot use $preferred_target_device_name (same size $current_size) for recreating $orig_device ($preferred_target_device_name is write-protected)"
++            continue
++        fi
+         # The first of all current block devices with same size as the original that is not yet used as target gets used:
+         add_mapping "$orig_device" "$preferred_target_device_name"
+         LogPrint "Using $preferred_target_device_name (same size $current_size) for recreating $orig_device"
+@@ -217,6 +227,14 @@ while read keyword orig_device orig_size junk ; do
+             Log "$preferred_target_device_name excluded from device mapping choices (is already used as mapping target)"
+             continue
+         fi
++        if is_write_protected_by_pt_uuid "$preferred_target_device_name"; then
++            Log "$preferred_target_device_name excluded from device mapping choices (write-protected partition table UUID)"
++            continue
++        fi
++        if is_write_protected_by_fs_label "$preferred_target_device_name"; then
++            Log "$preferred_target_device_name excluded from device mapping choices (write-protected file system label)"
++            continue
++        fi
+         LogPrint "The size of $preferred_target_device_name is $(blockdev --getsize64 $current_device_path)"
+         # Add the current device as possible choice for the user:
+         possible_targets+=( "$preferred_target_device_name" )
+diff --git a/usr/share/rear/lib/write-protect-functions.sh b/usr/share/rear/lib/write-protect-functions.sh
+new file mode 100644
+index 000000000..709ebbe41
+--- /dev/null
++++ b/usr/share/rear/lib/write-protect-functions.sh
+@@ -0,0 +1,57 @@
++#!/bin/bash
++#
++# Functions to identify write-protected disks and partitions
++#
++
++function write_protected_candidate_device() {
++    local device="$1"
++    # prints the path of the block device, translating it if given as /sys/block/*.
++
++    if [[ "$device" == /sys/block/* ]]; then
++        device="$(get_device_name "$device")"
++    fi
++    [[ ! -b "$device" ]] && Error "Could not check '$1' ('$device') for write protection – not a block device"
++    echo "$device"
++}
++
++function is_write_protected_by_pt_uuid() {
++    local device="$(write_protected_candidate_device "$1")"
++    # returns 0 if the device's partition table UUID is in the list of write-protected UUIDs.
++
++    local partition_table_uuid="$(lsblk --output PTUUID --noheadings --nodeps "$device")"
++
++    if [[ " ${WRITE_PROTECTED_PARTITION_TABLE_UUIDS[*]} " == *" $partition_table_uuid "* ]]; then
++        Log "$device is designated as write-protected by partition table UUID '$partition_table_uuid'"
++        return 0
++    fi
++
++    return 1
++}
++
++function is_write_protected_by_fs_label() {
++    local device="$(write_protected_candidate_device "$1")"
++    # returns 0 if one of the device's file system labels matches a prefix from the list of write-protected
++    # label prefixes.
++
++    # Check all partitions of a device for a matching label
++    local write_protected_pattern
++    while read -r partition_label; do
++        if [[ -n "$partition_label" ]]; then
++            for write_protected_pattern in "${WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS[@]}"; do
++                if [[ "$partition_label" == $write_protected_pattern ]]; then
++                    Log "$device is designated as write-protected, its label '$partition_label' matches '$write_protected_pattern'"
++                    return 0
++                fi
++            done
++        fi
++    done < <(lsblk --output LABEL --noheadings "$device")
++
++    return 1
++}
++
++function is_write_protected() {
++    local device="$(write_protected_candidate_device "$1")"
++    # returns 0 if the device is designated as write-protected by any of the above means.
++
++    is_write_protected_by_pt_uuid "$device" || is_write_protected_by_fs_label "$device"
++}
+diff --git a/usr/share/rear/output/RAWDISK/Linux-i386/280_create_bootable_disk_image.sh b/usr/share/rear/output/RAWDISK/Linux-i386/280_create_bootable_disk_image.sh
+index 497ff8979..dcbc4633e 100644
+--- a/usr/share/rear/output/RAWDISK/Linux-i386/280_create_bootable_disk_image.sh
++++ b/usr/share/rear/output/RAWDISK/Linux-i386/280_create_bootable_disk_image.sh
+@@ -53,7 +53,10 @@ local typecode="8300"  # Linux partition for non-EFI booting
+ local legacy_boot_option=""
+ is_true $use_syslinux_legacy && legacy_boot_option="--attributes=1:set:2"  # mark partition as Legacy BIOS-bootable
+ 
+-sgdisk --new 1::0 --typecode=1:"$typecode" --change-name=1:"${RAWDISK_GPT_PARTITION_NAME:-Rescue System}" $legacy_boot_option "$disk_image"
++local guid_option=""
++[[ -n "$RAWDISK_PTUUID" ]] && guid_option="--disk-guid=$RAWDISK_PTUUID"  # Use a pre-determined partition UUID
++
++sgdisk $guid_option --new 1::0 --typecode=1:"$typecode" --change-name=1:"${RAWDISK_GPT_PARTITION_NAME:-Rescue System}" $legacy_boot_option "$disk_image"
+ StopIfError "Could not create GPT partition table on $disk_image"
+ 
+ Log "Raw disk image partition table:"
+diff --git a/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh b/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh
+new file mode 100644
+index 000000000..87929e5c5
+--- /dev/null
++++ b/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh
+@@ -0,0 +1,13 @@
++# RAWDISK output typically resides on a writable disk device, which should be protected against
++# accidental overwriting by rear recover. This code initializes RAWDISK_PTUUID, a partition table UUID
++# designating ReaR's own boot device and registers it as write protected.
++
++if has_binary uuidgen; then
++    # Generate a partition table UUID now and add it to the kernel's command line options.
++    #
++    # Normally, a partition table UUID is generated automatically during partitioning. We cannot wait for this
++    # to happen as the variable will be part of the initrd, which is completed before any partition table is
++    # created.
++    RAWDISK_PTUUID="$(uuidgen)"
++    WRITE_PROTECTED_PARTITION_TABLE_UUIDS+=( $RAWDISK_PTUUID )
++fi
+diff --git a/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh b/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh
+new file mode 100644
+index 000000000..bde1fb26c
+--- /dev/null
++++ b/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh
+@@ -0,0 +1,4 @@
++# USB output typically resides on a writable disk device, which should be protected against
++# accidental overwriting by rear recover. This code registers it as write protected.
++
++WRITE_PROTECTED_PARTITION_TABLE_UUIDS+=( $(lsblk --output PTUUID --noheadings --nodeps "$USB_DEVICE") )
+diff --git a/usr/share/rear/prep/default/490_store_write_protect_settings.sh b/usr/share/rear/prep/default/490_store_write_protect_settings.sh
+new file mode 100644
+index 000000000..eba36cf28
+--- /dev/null
++++ b/usr/share/rear/prep/default/490_store_write_protect_settings.sh
+@@ -0,0 +1,15 @@
++# Store settings for write-protected file systems in the rescue configuration.
++
++{
++    echo "# The following lines were added by 490_store_write_protect_settings.sh"
++
++    echo "WRITE_PROTECTED_PARTITION_TABLE_UUIDS=( ${WRITE_PROTECTED_PARTITION_TABLE_UUIDS[*]} )"
++
++    echo -n "WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS=("
++    for prefix in "${WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS[@]}"; do
++        [[ -n "$prefix" ]] && echo -n " '$prefix'"
++    done
++    echo " )"
++
++    echo ""
++} >> "$ROOTFS_DIR/etc/rear/rescue.conf"
+commit a5edba7551884e9201a21fc1ea33de7ca7e6cb07
+Merge: 039b7b255 46a6e9ad3
+Author: Johannes Meixner <jsmeix@suse.com>
+Date:   Wed Nov 10 13:41:17 2021 +0100
+
+    Merge pull request #2703 from rear/jsmeix-write-protect
+    
+    Enhanced disk write-protection,
+    see https://github.com/rear/rear/pull/2626
+    WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS
+    is shortened to WRITE_PROTECTED_FS_LABEL_PATTERNS.
+    The specific WRITE_PROTECTED_PARTITION_TABLE_UUIDS
+    is replaced by WRITE_PROTECTED_IDS with generic functionality,
+    cf. https://github.com/rear/rear/pull/2626#issuecomment-950953826
+    together with the new WRITE_PROTECTED_ID_TYPES which
+    defaults to UUID PTUUID PARTUUID WWN so that the user can
+    specify different lsblk columns as needed in his particular environment
+    cf. https://github.com/rear/rear/pull/2703#issuecomment-962418441
+
+(cherry-picked from commit a5edba7551884e9201a21fc1ea33de7ca7e6cb07)
+
+diff --git a/usr/share/rear/conf/default.conf b/usr/share/rear/conf/default.conf
+index 17b2310fd..041772d07 100644
+--- a/usr/share/rear/conf/default.conf
++++ b/usr/share/rear/conf/default.conf
+@@ -527,19 +527,45 @@ AUTOINCREASE_DISK_SIZE_THRESHOLD_PERCENTAGE=10
+ 
+ ##
+ # Write-protection during "rear recover"
+-#
+-# Designate target disk devices or partitions as write-protected
+-# to avoid being accidentally overwritten during "rear recover".
+-#
+-# List of partition table UUIDs, which designate write-protected disk devices.
+-# ReaR's own disk device will be automatically added to this list if necessary.
+-# Example: WRITE_PROTECTED_PARTITION_TABLE_UUIDS+=("ecacbce4-e05e-4eb9-835c-ade0c3ed0fea")
+-WRITE_PROTECTED_PARTITION_TABLE_UUIDS=()
+-#
+-# List of (shell glob) patterns, which designate matching file system labels as write-protected partitions.
++# for OUTPUT=USB and OUTPUT=RAWDISK
++#
++# Designate disks via disk specific IDs or file system labels as write-protected
++# to avoid that those disks could get used as target disk during "rear recover"
++# via WRITE_PROTECTED_IDS and WRITE_PROTECTED_FS_LABEL_PATTERNS
++# in etc/rear/rescue.conf in the ReaR rescue/recovery system.
++#
++# WRITE_PROTECTED_ID_TYPES is a string of the 'lsblk' output columns where
++# their values are stored in WRITE_PROTECTED_IDS during "rear mkrescue/mkbackup".
++# During "rear recover" a disk is write-protected when one of the values
++# of this 'lsblk' output columns for the disk also exists in WRITE_PROTECTED_IDS.
++# The default 'lsblk' output columns for write-protection via disk specific IDs are
++#       UUID filesystem UUID
++#     PTUUID partition table identifier (usually UUID)
++#   PARTUUID partition UUID
++#        WWN unique storage identifier
++WRITE_PROTECTED_ID_TYPES="UUID PTUUID PARTUUID WWN"
++#
++# For OUTPUT=USB the values of the 'lsblk' output columns in WRITE_PROTECTED_ID_TYPES
++# of the ReaR recovery system disk (i.e. USB_DEVICE) are automatically added
++# to the WRITE_PROTECTED_IDS array during "rear mkrescue/mkbackup".
++# For OUTPUT=RAWDISK a partition table UUID is generated (provided 'uuidgen' is there)
++# that is added to the WRITE_PROTECTED_IDS array.
++# For the IDs in WRITE_PROTECTED_IDS their matching 'lsblk' output columns
++# must exist in WRITE_PROTECTED_ID_TYPES because only this ID types are used
++# to test if a disk is write-protected (see WRITE_PROTECTED_ID_TYPES above).
++# E.g. if you like to use additionally the 'lsblk' output column MODEL as ID
++# in WRITE_PROTECTED_IDS like WRITE_PROTECTED_IDS+=( "ACME_USB_DISK_XL" )
++# you must also append that 'lsblk' output column as separated additional word
++# to the WRITE_PROTECTED_ID_TYPES string like WRITE_PROTECTED_ID_TYPES+=" MODEL"
++WRITE_PROTECTED_IDS=()
++#
++# WRITE_PROTECTED_FS_LABEL_PATTERNS is an array of (shell glob) patterns which designate
++# matching file system labels as write-protected partitions to write-protect their disk.
+ # Entries may be quoted and contain blanks, but they may not contain single quotes themselves.
+-# Example: WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS+=("Backup *")
+-WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS=()
++# Example: WRITE_PROTECTED_FS_LABEL_PATTERNS+=( "Backup *" )
++# For OUTPUT=USB the file system label of the ReaR data partition on the ReaR recovery system disk
++# is automatically added to WRITE_PROTECTED_FS_LABEL_PATTERNS during "rear mkrescue/mkbackup".
++WRITE_PROTECTED_FS_LABEL_PATTERNS=()
+ 
+ ##
+ # Creating XFS filesystems during "rear recover"
+diff --git a/usr/share/rear/layout/prepare/default/300_map_disks.sh b/usr/share/rear/layout/prepare/default/300_map_disks.sh
+index 7e879470f..7b127b3ab 100644
+--- a/usr/share/rear/layout/prepare/default/300_map_disks.sh
++++ b/usr/share/rear/layout/prepare/default/300_map_disks.sh
+@@ -115,6 +115,11 @@ while read keyword orig_device orig_size junk ; do
+         continue
+     fi
+     # The original device is not yet mapped (i.e. not used as source in the mapping file) so it needs to be mapped.
++    # Remember when target devices get known by the "same name and same size" tests
++    # that they cannot be used for recreating the current original device
++    # to avoid that already excluded target devices get needlessly
++    # considered again during the subsequent "same size" tests:
++    excluded_target_device_names=()
+     # First, try to find if there is a current disk with same name and same size as the original:
+     # (possibly influenced by mapping hints if known)
+     if has_mapping_hint "$orig_device" ; then
+@@ -132,10 +137,12 @@ while read keyword orig_device orig_size junk ; do
+                 # Do not map if the current one is already used as target in the mapping file:
+                 if is_mapping_target "$preferred_target_device_name" ; then
+                     DebugPrint "Cannot use $preferred_target_device_name ($mapping_reason) for recreating $orig_device ($preferred_target_device_name already exists as target in $MAPPING_FILE)"
++                    excluded_target_device_names+=( "$preferred_target_device_name" )
+                 else
+                     # Ensure the determined target device is not write-protected:
+                     if is_write_protected "$preferred_target_device_name" ; then
+                         DebugPrint "Cannot use $preferred_target_device_name ($mapping_reason) for recreating $orig_device ($preferred_target_device_name is write-protected)"
++                        excluded_target_device_names+=( "$preferred_target_device_name" )
+                     else
+                         add_mapping "$orig_device" "$preferred_target_device_name"
+                         LogPrint "Using $preferred_target_device_name ($mapping_reason) for recreating $orig_device"
+@@ -160,9 +167,11 @@ while read keyword orig_device orig_size junk ; do
+         preferred_target_device_name="$( get_device_name $current_device_path )"
+         # Ensure the determined target device is really a block device (cf. above):
+         test -b "$preferred_target_device_name" || continue
+-        # Continue with next current block device if the current one is not of same size as the original:
++        # Continue with next block device if the current one is not of same size as the original:
+         test "$orig_size" -eq "$current_size" || continue
+-        # Continue with next current block device if the current one is already used as target in the mapping file:
++        # Continue with next block device if the current one was already excluded by the "same name and same size" tests above:
++        IsInArray "$preferred_target_device_name" "${excluded_target_device_names[@]}" && continue
++        # Continue with next block device if the current one is already used as target in the mapping file:
+         if is_mapping_target "$preferred_target_device_name" ; then
+             DebugPrint "Cannot use $preferred_target_device_name (same size $current_size) for recreating $orig_device ($preferred_target_device_name already exists as target in $MAPPING_FILE)"
+             continue
+@@ -227,12 +236,9 @@ while read keyword orig_device orig_size junk ; do
+             Log "$preferred_target_device_name excluded from device mapping choices (is already used as mapping target)"
+             continue
+         fi
+-        if is_write_protected_by_pt_uuid "$preferred_target_device_name"; then
+-            Log "$preferred_target_device_name excluded from device mapping choices (write-protected partition table UUID)"
+-            continue
+-        fi
+-        if is_write_protected_by_fs_label "$preferred_target_device_name"; then
+-            Log "$preferred_target_device_name excluded from device mapping choices (write-protected file system label)"
++        # Continue with next block device if the current one is designated as write-protected:
++        if is_write_protected "$preferred_target_device_name"; then
++            Log "$preferred_target_device_name excluded from device mapping choices (is designated as write-protected)"
+             continue
+         fi
+         LogPrint "The size of $preferred_target_device_name is $(blockdev --getsize64 $current_device_path)"
+diff --git a/usr/share/rear/lib/write-protect-functions.sh b/usr/share/rear/lib/write-protect-functions.sh
+index 709ebbe41..cbc9e390b 100644
+--- a/usr/share/rear/lib/write-protect-functions.sh
++++ b/usr/share/rear/lib/write-protect-functions.sh
+@@ -8,23 +8,73 @@ function write_protected_candidate_device() {
+     # prints the path of the block device, translating it if given as /sys/block/*.
+ 
+     if [[ "$device" == /sys/block/* ]]; then
+-        device="$(get_device_name "$device")"
++        device="$( get_device_name "$device" )"
+     fi
+-    [[ ! -b "$device" ]] && Error "Could not check '$1' ('$device') for write protection – not a block device"
++    test -b "$device" || BugError "write_protected_candidate_device called for '$1' but '$device' is no block device"
+     echo "$device"
+ }
+ 
+-function is_write_protected_by_pt_uuid() {
+-    local device="$(write_protected_candidate_device "$1")"
+-    # returns 0 if the device's partition table UUID is in the list of write-protected UUIDs.
++function write_protection_ids() {
++    local device="$( write_protected_candidate_device "$1" )"
++    # Output the IDs for write-protection, each ID on a separated line.
++
++    # At least for OUTPUT=USB $device is of the form /dev/disk/by-label/$USB_DEVICE_FILESYSTEM_LABEL
++    # which is a symlink to the ReaR data partition (e.g. /dev/sdb3 on a USB disk /dev/sdb).
++    # On a USB disk that was formatted with "rear format" there is only one layer of child devices
++    # (i.e. there are only partitions like /dev/sdb1 /dev/sdb2 /dev/sdb3 on a USB disk /dev/sdb).
++    # So we only need to use the direct parent device to get all IDs of the whole disk
++    # because the goal is to write-protect the whole disk by using all its IDs
++    # cf. https://github.com/rear/rear/pull/2703#issuecomment-952888484
++    local parent_device=""
++    # Older Linux distributions do not contain lsblk (e.g. SLES10)
++    # and older lsblk versions do not support the output column PKNAME
++    # e.g. lsblk in util-linux 2.19.1 in SLES11 supports NAME and KNAME but not PKNAME
++    # cf. https://github.com/rear/rear/pull/2626#issuecomment-856700823
++    # We ignore lsblk failures and error messages and we skip empty lines in the output via 'awk NF'
++    # cf. https://unix.stackexchange.com/questions/274708/most-elegant-pipe-to-get-rid-of-empty-lines-you-can-think-of
++    # and https://stackoverflow.com/questions/23544804/how-awk-nf-filename-is-working
++    # (an empty line appears for a whole disk device e.g. /dev/sdb that has no PKNAME)
++    # and we use only the topmost reported PKNAME:
++    parent_device="$( lsblk -inpo PKNAME "$device" 2>/dev/null | awk NF | head -n1 )"
++    # parent_device is empty when lsblk does not support PKNAME.
++    # Without quoting an empty parent_device would result plain "test -b" which would (falsely) succeed:
++    test -b "$parent_device" && device="$parent_device"
++
++    local column
++    # The default WRITE_PROTECTED_ID_TYPES are UUID PTUUID PARTUUID WWN.
++    # Older lsblk versions do not support all output columns UUID PTUUID PARTUUID WWN
++    # e.g. lsblk in util-linux 2.19.1 in SLES11 only supports UUID but neither PTUUID nor PARTUUID nor WWN
++    # cf. https://github.com/rear/rear/pull/2626#issuecomment-856700823
++    # When an unsupported output column is specified lsblk aborts with "unknown column" error message
++    # without output for supported output columns so we run lsblk for each output column separately
++    # and ignore lsblk failures and error messages and we skip empty lines in the output via 'awk NF'
++    # (empty lines appear when a partition does not have a filesystem UUID or for the whole device that has no PARTUUID
++    #  or for all columns except UUID when a child device is a /dev/mapper/* device
++    #  and some devices do not have any WWN set)
++    # and we remove duplicate reported IDs (in particular PTUUID is reported also for each partition):
++    for column in $WRITE_PROTECTED_ID_TYPES ; do lsblk -ino $column "$device" 2>/dev/null ; done | awk NF | sort -u
++}
+ 
+-    local partition_table_uuid="$(lsblk --output PTUUID --noheadings --nodeps "$device")"
++function is_write_protected_by_id() {
++    local device="$(write_protected_candidate_device "$1")"
++    # returns 0 if one of the device's IDs is in the list of write-protected IDs.
+ 
+-    if [[ " ${WRITE_PROTECTED_PARTITION_TABLE_UUIDS[*]} " == *" $partition_table_uuid "* ]]; then
+-        Log "$device is designated as write-protected by partition table UUID '$partition_table_uuid'"
++    local ids id
++    ids="$( write_protection_ids "$device" )"
++    # ids is a string of IDs separated by newline characters
++    if ! test "$ids" ; then
++        LogPrintError "Cannot check write protection by ID for $device (no ID found)"
++        # It is safer to assume that the disk is protected (and thus return 0)
++        # instead of assuming that it is not protected and blindly proceed:
+         return 0
+     fi
+-
++    for id in $ids ; do
++        if IsInArray "$id" "${WRITE_PROTECTED_IDS[@]}" ; then
++            Log "$device is designated as write-protected by ID $id"
++            return 0
++        fi
++    done
++    Log "$device is not write-protected by ID"
+     return 1
+ }
+ 
+@@ -37,7 +87,7 @@ function is_write_protected_by_fs_label() {
+     local write_protected_pattern
+     while read -r partition_label; do
+         if [[ -n "$partition_label" ]]; then
+-            for write_protected_pattern in "${WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS[@]}"; do
++            for write_protected_pattern in "${WRITE_PROTECTED_FS_LABEL_PATTERNS[@]}"; do
+                 if [[ "$partition_label" == $write_protected_pattern ]]; then
+                     Log "$device is designated as write-protected, its label '$partition_label' matches '$write_protected_pattern'"
+                     return 0
+@@ -45,7 +95,7 @@ function is_write_protected_by_fs_label() {
+             done
+         fi
+     done < <(lsblk --output LABEL --noheadings "$device")
+-
++    Log "$device is not write-protected by file system label"
+     return 1
+ }
+ 
+@@ -53,5 +103,5 @@ function is_write_protected() {
+     local device="$(write_protected_candidate_device "$1")"
+     # returns 0 if the device is designated as write-protected by any of the above means.
+ 
+-    is_write_protected_by_pt_uuid "$device" || is_write_protected_by_fs_label "$device"
++    is_write_protected_by_id "$device" || is_write_protected_by_fs_label "$device"
+ }
+diff --git a/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh b/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh
+index 87929e5c5..0199d0059 100644
+--- a/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh
++++ b/usr/share/rear/prep/RAWDISK/Linux-i386/480_initialize_write_protect_settings.sh
+@@ -8,6 +8,12 @@ if has_binary uuidgen; then
+     # Normally, a partition table UUID is generated automatically during partitioning. We cannot wait for this
+     # to happen as the variable will be part of the initrd, which is completed before any partition table is
+     # created.
+-    RAWDISK_PTUUID="$(uuidgen)"
+-    WRITE_PROTECTED_PARTITION_TABLE_UUIDS+=( $RAWDISK_PTUUID )
++    RAWDISK_PTUUID="$( uuidgen )"
++    if test "$RAWDISK_PTUUID"; then
++        WRITE_PROTECTED_IDS+=( $RAWDISK_PTUUID )
++    else
++        LogPrintError "Cannot write protect '${RAWDISK_GPT_PARTITION_NAME:-Rescue System}' disk (no partition table UUID)"
++    fi
++else
++    LogPrintError "Cannot write protect '${RAWDISK_GPT_PARTITION_NAME:-Rescue System}' disk (no 'uuidgen' found)"
+ fi
+diff --git a/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh b/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh
+index bde1fb26c..4a9fea047 100644
+--- a/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh
++++ b/usr/share/rear/prep/USB/default/480_initialize_write_protect_settings.sh
+@@ -1,4 +1,29 @@
+-# USB output typically resides on a writable disk device, which should be protected against
+-# accidental overwriting by rear recover. This code registers it as write protected.
++# USB output typically resides on a writable disk device
++# which should be protected against overwriting by "rear recover"
++# cf. https://github.com/rear/rear/issues/1271
++# This code registers the USB output device as write protected.
+ 
+-WRITE_PROTECTED_PARTITION_TABLE_UUIDS+=( $(lsblk --output PTUUID --noheadings --nodeps "$USB_DEVICE") )
++# The values of the 'lsblk' output columns in WRITE_PROTECTED_ID_TYPES
++# of the ReaR recovery system disk (parent of USB_DEVICE) are automatically added
++# to the WRITE_PROTECTED_IDS array during "rear mkrescue/mkbackup".
++# The default WRITE_PROTECTED_ID_TYPES are UUID PTUUID PARTUUID WWN.
++local ids
++ids="$( write_protection_ids "$USB_DEVICE" )"
++# ids is a string of IDs separated by newline characters so quoting for 'test' is required
++# but no quoting to add them to the array to get each ID as a separated array element:
++if test "$ids" ; then
++    WRITE_PROTECTED_IDS+=( $ids )
++    DebugPrint "USB disk IDs of '$USB_DEVICE' added to WRITE_PROTECTED_IDS"
++else
++    LogPrintError "Cannot write protect USB disk of '$USB_DEVICE' via ID (no ID found)"
++fi
++
++# The file system label of the ReaR data partition (i.e. USB_DEVICE) on the ReaR recovery system disk
++# is automatically added to WRITE_PROTECTED_FS_LABEL_PATTERNS during "rear mkrescue/mkbackup".
++# Empty lines in the lsblk output get automatically ignored (i.e. no empty array elements get added)
++# and we do not alert the user via LogPrintError because file system labels are optional:
++if WRITE_PROTECTED_FS_LABEL_PATTERNS+=( $( lsblk -ino LABEL "$USB_DEVICE" ) ) ; then
++    DebugPrint "File system label of '$USB_DEVICE' added to WRITE_PROTECTED_FS_LABEL_PATTERNS"
++else
++    DebugPrint "Cannot write protect USB disk of '$USB_DEVICE' via file system label (none found)"
++fi
+diff --git a/usr/share/rear/prep/default/490_store_write_protect_settings.sh b/usr/share/rear/prep/default/490_store_write_protect_settings.sh
+index eba36cf28..6309184f4 100644
+--- a/usr/share/rear/prep/default/490_store_write_protect_settings.sh
++++ b/usr/share/rear/prep/default/490_store_write_protect_settings.sh
+@@ -3,10 +3,10 @@
+ {
+     echo "# The following lines were added by 490_store_write_protect_settings.sh"
+ 
+-    echo "WRITE_PROTECTED_PARTITION_TABLE_UUIDS=( ${WRITE_PROTECTED_PARTITION_TABLE_UUIDS[*]} )"
++    echo "WRITE_PROTECTED_IDS=( ${WRITE_PROTECTED_IDS[*]} )"
+ 
+-    echo -n "WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS=("
+-    for prefix in "${WRITE_PROTECTED_FILE_SYSTEM_LABEL_PATTERNS[@]}"; do
++    echo -n "WRITE_PROTECTED_FS_LABEL_PATTERNS=("
++    for prefix in "${WRITE_PROTECTED_FS_LABEL_PATTERNS[@]}"; do
+         [[ -n "$prefix" ]] && echo -n " '$prefix'"
+     done
+     echo " )"

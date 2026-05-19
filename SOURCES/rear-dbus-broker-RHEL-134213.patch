@@ -1,0 +1,129 @@
+From 9143e620579a14a3897b9842db5a2546e1e6b437 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Zaoral?= <lzaoral@redhat.com>
+Date: Mon, 25 Aug 2025 10:14:29 +0200
+Subject: [PATCH 1/3] Copy dbus-broker binaries and configs when present on
+ host
+
+Resolves: https://github.com/rear/rear/issues/3480
+---
+ usr/share/rear/prep/GNU/Linux/280_include_systemd.sh | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/usr/share/rear/prep/GNU/Linux/280_include_systemd.sh b/usr/share/rear/prep/GNU/Linux/280_include_systemd.sh
+index b45597c11c..e78036dfc5 100644
+--- a/usr/share/rear/prep/GNU/Linux/280_include_systemd.sh
++++ b/usr/share/rear/prep/GNU/Linux/280_include_systemd.sh
+@@ -6,7 +6,7 @@
+ if ps ax | grep -v grep | grep -q systemd ; then
+     PROGS+=( systemd agetty systemctl systemd-notify systemd-ask-password
+              systemd-udevd systemd-journald journalctl
+-             dbus-uuidgen dbus-daemon dbus-send
++             dbus-uuidgen dbus-daemon dbus-send dbus-broker dbus-broker-launch
+              upstart-udev-bridge systemd-tmpfiles )
+     # cgroup stuff - not required for ReaR
+     #PROGS+=( cg_annotate cgclear cgcreate cgget cgrulesengd cgset cgdelete cgclassify cgexec )
+@@ -15,7 +15,7 @@ if ps ax | grep -v grep | grep -q systemd ; then
+     # 2- Need to add systemd/network subdir in order to preserve rules about network device naming
+     #    (predictable naming or persitant naming / like udev).
+     #    more info here: https://www.freedesktop.org/wiki/Software/systemd/PredictableNetworkInterfaceNames/
+-    COPY_AS_IS+=( /usr/share/systemd /etc/dbus-1
++    COPY_AS_IS+=( /usr/share/systemd /etc/dbus-1 /usr/share/dbus-1
+                   /usr/lib/systemd/systemd-* /lib/systemd/systemd-*
+                   /usr/lib/systemd/network /lib/systemd/network
+                   /usr/lib/systemd/system-generators/systemd-getty-generator
+
+From 75654caee0424df3911add7fa41bb33df7b59021 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Zaoral?= <lzaoral@redhat.com>
+Date: Mon, 25 Aug 2025 10:17:56 +0200
+Subject: [PATCH 2/3] Prefer dbus-broker over dbus-daemon in rescue
+
+... if the host has dbus-broker installed.
+
+Resolves: https://github.com/rear/rear/issues/3480
+---
+ .../GNU/Linux/610_verify_and_adjust_udev_systemd.sh   |  6 ++++++
+ .../usr/lib/systemd/system/dbus-broker.service        | 11 +++++++++++
+ .../system/{dbus.service => dbus-daemon.service}      |  0
+ 3 files changed, 17 insertions(+)
+ create mode 100644 usr/share/rear/skel/default/usr/lib/systemd/system/dbus-broker.service
+ rename usr/share/rear/skel/default/usr/lib/systemd/system/{dbus.service => dbus-daemon.service} (100%)
+
+diff --git a/usr/share/rear/build/GNU/Linux/610_verify_and_adjust_udev_systemd.sh b/usr/share/rear/build/GNU/Linux/610_verify_and_adjust_udev_systemd.sh
+index 69b0b6b92d..7d2a7ff417 100644
+--- a/usr/share/rear/build/GNU/Linux/610_verify_and_adjust_udev_systemd.sh
++++ b/usr/share/rear/build/GNU/Linux/610_verify_and_adjust_udev_systemd.sh
+@@ -30,3 +30,9 @@ for m in "${my_udev_files[@]}" ; do
+     fi
+ done
+ 
++# prefer dbus-broker over dbus-daemon (the reference implementation)
++if [[ -f /lib/systemd/system/dbus-broker.service ]] || [[ -f /usr/lib/systemd/system/dbus-broker.service ]]; then
++    ln $v -rsf $ROOTFS_DIR/usr/lib/systemd/system/dbus{-broker,}.service >&2
++else
++    ln $v -rsf $ROOTFS_DIR/usr/lib/systemd/system/dbus{-daemon,}.service >&2
++fi
+diff --git a/usr/share/rear/skel/default/usr/lib/systemd/system/dbus-broker.service b/usr/share/rear/skel/default/usr/lib/systemd/system/dbus-broker.service
+new file mode 100644
+index 0000000000..965c1ce984
+--- /dev/null
++++ b/usr/share/rear/skel/default/usr/lib/systemd/system/dbus-broker.service
+@@ -0,0 +1,11 @@
++[Unit]
++Description=D-Bus System Message Bus
++Documentation=man:dbus-broker-launch(1)
++After=dbus.socket
++Requires=dbus.socket
++
++[Service]
++Type=notify-reload
++Sockets=dbus.socket
++OOMScoreAdjust=-900
++ExecStart=/usr/bin/dbus-broker-launch --scope system
+diff --git a/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.service b/usr/share/rear/skel/default/usr/lib/systemd/system/dbus-daemon.service
+similarity index 100%
+rename from usr/share/rear/skel/default/usr/lib/systemd/system/dbus.service
+rename to usr/share/rear/skel/default/usr/lib/systemd/system/dbus-daemon.service
+
+From 05ab7584baf81c1e3ea99513d9a50a09ac3d0687 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Zaoral?= <lzaoral@redhat.com>
+Date: Mon, 25 Aug 2025 12:47:42 +0200
+Subject: [PATCH 3/3] Modernize dbus.socket unit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+/var/run has been a symlink pointing to /run since Fedora 15 (RHEL 7+) and
+modern systemd now issues a warning when some units still use this legacy path:
+
+```
+systemd[1]: /usr/lib/systemd/system/dbus.socket:5: ListenStream= references a path below legacy directory /var/run/,
+updating /var/run/dbus/system_bus_socket → /run/dbus/system_bus_socket; please update the unit file accordingly.
+```
+
+Moreover, the dbus.target.wants directory can be removed because the dbus.target
+unit was never committed to this repository.
+---
+ usr/share/rear/skel/default/usr/lib/systemd/system/dbus.socket  | 2 +-
+ .../usr/lib/systemd/system/dbus.target.wants/dbus.service       | 1 -
+ 2 files changed, 1 insertion(+), 2 deletions(-)
+ delete mode 120000 usr/share/rear/skel/default/usr/lib/systemd/system/dbus.target.wants/dbus.service
+
+diff --git a/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.socket b/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.socket
+index 0303bfbde6..5c373cf450 100644
+--- a/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.socket
++++ b/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.socket
+@@ -2,4 +2,4 @@
+ Description=D-Bus System Message Bus Socket
+ 
+ [Socket]
+-ListenStream=/var/run/dbus/system_bus_socket
++ListenStream=/run/dbus/system_bus_socket
+diff --git a/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.target.wants/dbus.service b/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.target.wants/dbus.service
+deleted file mode 120000
+index 224df24b70..0000000000
+--- a/usr/share/rear/skel/default/usr/lib/systemd/system/dbus.target.wants/dbus.service
++++ /dev/null
+@@ -1 +0,0 @@
+-../dbus.service
+\ No newline at end of file
+

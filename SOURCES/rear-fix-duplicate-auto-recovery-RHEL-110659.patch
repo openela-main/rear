@@ -1,0 +1,577 @@
+From 8a122cb5cfc28ce8c83baa963ad12f1c42e1c908 Mon Sep 17 00:00:00 2001
+From: Johannes Meixner <jsmeix@suse.com>
+Date: Tue, 6 May 2025 14:42:22 +0200
+Subject: [PATCH] Set ReaR paths early in system-setup (#3465)
+
+In skel/default/etc/scripts/system-setup
+set ReaR path variables early because they are used
+e.g. SHARE_DIR is used in default.conf
+and use ReaR path variables (SHARE_DIR / CONFIG_DIR)
+also in system-setup instead of hardcoded paths.
+---
+ .../skel/default/etc/scripts/system-setup     | 27 ++++++++++---------
+ 1 file changed, 14 insertions(+), 13 deletions(-)
+
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup b/usr/share/rear/skel/default/etc/scripts/system-setup
+index 8ab0f7f1d2..228eb5dcdf 100755
+--- a/usr/share/rear/skel/default/etc/scripts/system-setup
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup
+@@ -21,11 +21,17 @@ source /etc/scripts/system-setup-functions.sh
+ # cf. the 'if rear_debug' part below:
+ sleep 1
+ 
++# In the rescue system these paths are always like this, either for real or as a symlink to the actual paths:
++CONFIG_DIR=/etc/rear
++SHARE_DIR=/usr/share/rear
++VAR_DIR=/var/lib/rear
++LOG_DIR=/var/log/rear
++
+ # Because "rear recover" won't work without default.conf
+ # we abort when there is no default.conf (or when it is empty),
+ # cf. https://github.com/rear/rear/pull/3070#discussion_r1389361339
+-if ! test -s /usr/share/rear/conf/default.conf ; then
+-    echo -e "\nERROR: ReaR recovery cannot work without /usr/share/rear/conf/default.conf\n"
++if ! test -s $SHARE_DIR/conf/default.conf ; then
++    echo -e "\nERROR: ReaR recovery cannot work without $SHARE_DIR/conf/default.conf\n"
+     # Wait hardcoded 10 seconds in any case so that the user can notice the
+     # 'ERROR: ReaR recovery cannot work without /usr/share/rear/conf/default.conf'
+     # on his screen before the screen gets cleared and replaced by the login screen
+@@ -34,7 +40,7 @@ if ! test -s /usr/share/rear/conf/default.conf ; then
+     # Replace the usual /etc/motd message
+     # 'Welcome to Relax-and-Recover. Run "rear recover" to restore your system !'
+     # because it does not make sense to run "rear recover" without default.conf:
+-    echo -e "\nRelax-and-Recover cannot work without /usr/share/rear/conf/default.conf\n" >/etc/motd
++    echo -e "\nRelax-and-Recover cannot work without $SHARE_DIR/conf/default.conf\n" >/etc/motd
+     # exiting this script proceeds directly to the login screen:
+     exit 1
+ fi
+@@ -43,21 +49,16 @@ fi
+ #   { VARIABLE='secret value' ; } 2>>/dev/$SECRET_OUTPUT_DEV
+ # cf. https://github.com/rear/rear/pull/3034#issuecomment-1691609782
+ SECRET_OUTPUT_DEV="null"
+-# Sourcing of the conf/default.conf file as we may use some defined variables or arrays
++# Sourcing /usr/share/rear/conf/default.conf as we need some variables or arrays
+ # E.g. UDEV_NET_MAC_RULE_FILES is used by script 55-migrate-network-devices.sh
+-source /usr/share/rear/conf/default.conf || echo -e "\n'source /usr/share/rear/conf/default.conf' failed with exit code $?"
++source $SHARE_DIR/conf/default.conf || echo -e "\n'source $SHARE_DIR/conf/default.conf' failed with exit code $?"
++
+ # Sourcing user and rescue configuration as we need some variables
+ # (EXCLUDE_MD5SUM_VERIFICATION right now and other variables in the system setup scripts):
+ # The order of sourcing should be 'site' then 'local' and as last 'rescue'
+-
+-# In the rescue system these paths are always like this, either for real or as a symlink to the actual paths
+-CONFIG_DIR=/etc/rear
+-SHARE_DIR=/usr/share/rear
+-VAR_DIR=/var/lib/rear
+-LOG_DIR=/var/log/rear
+ for conf in site local rescue ; do
+-    if test -s /etc/rear/$conf.conf ; then
+-        source /etc/rear/$conf.conf || echo -e "\n'source /etc/rear/$conf.conf' failed with exit code $?"
++    if test -s $CONFIG_DIR/$conf.conf ; then
++        source $CONFIG_DIR/$conf.conf || echo -e "\n'source $CONFIG_DIR/$conf.conf' failed with exit code $?"
+     fi
+ done
+ 
+From b92bf343908168b22bda4dbc72373ab7c49b13fc Mon Sep 17 00:00:00 2001
+From: Pavel Cahyna <pcahyna@redhat.com>
+Date: Fri, 29 Aug 2025 20:27:24 +0200
+Subject: [PATCH 1/6] Fix botched merge of PR #3041
+
+When the branch of PR #3041 was merged with master (commit
+f4111f0c9c10ad4942f1061d8580fb7083886a71), conflicting changes from both
+sides were kept. This has resulted in the code for automated/unattended
+ReaR recovery startup on rescue system boot being present twice, as
+discovered by @lzaoral:
+https://github.com/rear/rear/pull/3041#issuecomment-3210788660 As a
+result, automated ReaR recovery got executed twice on recovery system
+boot.
+
+Fix by merging the code properly (this involves merging the changes
+originally made in skel/default/etc/scripts/system-setup into the moved
+version in skel/default/etc/scripts/run-automatic-rear in order to not
+lose them).
+---
+ .../default/etc/scripts/run-automatic-rear    |  86 +++++++++----
+ .../skel/default/etc/scripts/system-setup     | 120 ------------------
+ 2 files changed, 61 insertions(+), 145 deletions(-)
+
+diff --git a/usr/share/rear/skel/default/etc/scripts/run-automatic-rear b/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
+index bc731185df..76a646c129 100755
+--- a/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
++++ b/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
+@@ -2,26 +2,34 @@
+ 
+ source /etc/scripts/system-setup-functions.sh
+ 
+-# In debug mode run the automated 'rear recover' also with debug options.
++# Make it explicit that the 'recover' workflow is always verbose (cf. usr/sbin/rear)
++# so when a 'rear $rear_options recover' command is shown to the user it contains '-v':
++rear_options='-v'
++# In debug mode run an automated 'rear $rear_options recover' command in debugscript mode.
+ # Because the kernel command line option 'debug' means 'set -x' for the system setup scripts
+-# it also means '-D' (i.e. 'set -x') for the automated 'rear recover' run:
+-if rear_debug ; then
+-    rear_debug_options='-D'
+-else
+-    rear_debug_options=''
+-fi
++# it should also mean '-D' (i.e. 'set -x') for an automated 'rear $rear_options recover' run:
++rear_debug && rear_options='-D'
++# In unattended_recovery mode run an automated 'rear $rear_options recover' in non-interactive mode:
++unattended_recovery && rear_options+=' --non-interactive'
+ 
+-# Launch rear recover automatically:
++# In automatic_recovery mode call RECOVERY_COMMANDS automatically
++# but without automated calling REBOOT_COMMANDS after successful recovery:
+ if automatic_recovery ; then
+     choices=( "View Relax-and-Recover log file(s)"
+-              "Go to Relax-and-Recover shell"
++              "Login at the rescue system"
+             )
+-    echo -e "\nLaunching 'rear recover' automatically\n"
+-    if rear $rear_debug_options recover ; then
+-        echo -e "\n'rear recover' finished successfully\n"
+-        choices+=( "Reboot" )
++    echo "Launching '$RECOVERY_COMMANDS_LABEL' automatically"
++    for command in "${RECOVERY_COMMANDS[@]}" ; do
++        rear_debug && echo "Running RECOVERY_COMMANDS '$command'"
++        eval "$command"
++        recovery_command_exit_code=$?
++        test $recovery_command_exit_code -eq 0 || echo "'eval $command' results exit code $recovery_command_exit_code"
++    done
++    if test $recovery_command_exit_code -eq 0 ; then
++        echo "'$RECOVERY_COMMANDS_LABEL' finished successfully"
++        choices+=( "$REBOOT_COMMANDS_LABEL" )
+     else
+-        echo -e "\n'rear recover' failed, check the Relax-and-Recover log file(s)\n"
++        echo "'$RECOVERY_COMMANDS_LABEL' failed with exit code $recovery_command_exit_code"
+     fi
+     PS3="Select what to do "
+     select choice in "${choices[@]}" ; do
+@@ -37,7 +45,18 @@ if automatic_recovery ; then
+                 break
+                 ;;
+             (3)
+-                reboot
++                for command in "${REBOOT_COMMANDS[@]}" ; do
++                    rear_debug && echo "Running REBOOT_COMMANDS '$command'"
++                    eval "$command" || echo "'eval $command' results exit code $?"
++                done
++                # Wait hardcoded 10 seconds to not let this script "just proceed"
++                # because it would proceed with an iteration of the 'select' loop
++                # which is not wanted for the normal reboot/poweroff cases
++                # so we sleep 10 seconds to give reboot/poweroff some time
++                # to terminate this script while it is idle waiting here
++                # but in exceptional cases (when REBOOT_COMMANDS did not reboot/poweroff)
++                # it proceeds after 10 seconds with an iteration of the 'select' loop:
++                sleep 10
+                 ;;
+         esac
+         for (( i=1 ; i <= ${#choices[@]} ; i++ )) ; do
+@@ -46,20 +65,37 @@ if automatic_recovery ; then
+     done 2>&1
+ fi
+ 
+-# Launch rear recover automatically in unattended mode
+-# i.e. with automated reboot after successful 'rear recover':
++# In unattended_recovery mode call RECOVERY_COMMANDS automatically
++# plus automated calling REBOOT_COMMANDS after successful recovery:
+ if unattended_recovery ; then
+     choices=( "View Relax-and-Recover log file(s)"
+-              "Go to Relax-and-Recover shell"
++              "Login at the rescue system"
+             )
+-    echo -e "\nLaunching 'rear recover' automatically in unattended mode\n"
+-    if rear $rear_debug_options --non-interactive recover ; then
+-        echo -e "\n'rear recover' finished successfully\n"
+-        echo -e "\nRebooting in 30 seconds (Ctrl-C to interrupt)\n"
+-        sleep 30
+-        reboot
++    echo "Launching '$RECOVERY_COMMANDS_LABEL' automatically"
++    for command in "${RECOVERY_COMMANDS[@]}" ; do
++        rear_debug && echo "Running RECOVERY_COMMANDS '$command'"
++        eval "$command"
++        recovery_command_exit_code=$?
++        test $recovery_command_exit_code -eq 0 || echo "'eval $command' results exit code $recovery_command_exit_code"
++    done
++    if test $recovery_command_exit_code -eq 0 ; then
++        echo "'$RECOVERY_COMMANDS_LABEL' finished successfully"
++        echo "'$REBOOT_COMMANDS_LABEL' in $USER_INPUT_INTERRUPT_TIMEOUT seconds (Ctrl-C to interrupt)"
++        sleep $USER_INPUT_INTERRUPT_TIMEOUT
++        for command in "${REBOOT_COMMANDS[@]}" ; do
++            rear_debug && echo "Running REBOOT_COMMANDS '$command'"
++            eval "$command" || echo "'eval $command' results exit code $?"
++        done
++        # Wait hardcoded 10 seconds to not let this script "just proceed"
++        # because it would show the login screen when this script finished
++        # which is not wanted for the normal reboot/poweroff cases
++        # so we sleep 10 seconds to give reboot/poweroff some time
++        # to terminate this script while it is idle waiting here
++        # but in exceptional cases (when REBOOT_COMMANDS did not reboot/poweroff)
++        # it proceeds after 10 seconds with the login screen:
++        sleep 10
+     else
+-        echo -e "\n'rear recover' failed, check the Relax-and-Recover log file(s)\n"
++        echo "'$RECOVERY_COMMANDS_LABEL' failed with exit code $recovery_command_exit_code"
+         PS3="Select what to do "
+         select choice in "${choices[@]}" ; do
+             case "$REPLY" in
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup b/usr/share/rear/skel/default/etc/scripts/system-setup
+index 228eb5dcdf..dc958cd5ca 100755
+--- a/usr/share/rear/skel/default/etc/scripts/system-setup
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup
+@@ -152,128 +152,8 @@ for system_setup_script in /etc/scripts/system-setup.d/*.sh ; do
+     fi
+ done
+ echo -e "\nRelax-and-Recover rescue system is ready\n"
+-
+-# Wait two seconds so that the user can read the 'Relax-and-Recover rescue system is ready' message
+-# on his screen before the screen gets cleared and replaced by the login screen:
+-sleep 2
+-
+ # Wait USER_INPUT_UNATTENDED_TIMEOUT (by default 3 seconds)
+ # so that the user can notice the 'Relax-and-Recover rescue system is ready' message
+ # on his screen before the screen gets cleared and replaced by the login screen
+ # unless in unattended_recovery mode where there is normally no watching user:
+ unattended_recovery || sleep $USER_INPUT_UNATTENDED_TIMEOUT
+-
+-# Make it explicit that the 'recover' workflow is always verbose (cf. usr/sbin/rear)
+-# so when a 'rear $rear_options recover' command is shown to the user it contains '-v':
+-rear_options='-v'
+-# In debug mode run an automated 'rear $rear_options recover' command in debugscript mode.
+-# Because the kernel command line option 'debug' means 'set -x' for the system setup scripts
+-# it should also mean '-D' (i.e. 'set -x') for an automated 'rear $rear_options recover' run:
+-rear_debug && rear_options='-D'
+-# In unattended_recovery mode run an automated 'rear $rear_options recover' in non-interactive mode:
+-unattended_recovery && rear_options+=' --non-interactive'
+-
+-# In automatic_recovery mode call RECOVERY_COMMANDS automatically
+-# but without automated calling REBOOT_COMMANDS after successful recovery:
+-if automatic_recovery ; then
+-    choices=( "View Relax-and-Recover log file(s)"
+-              "Login at the rescue system"
+-            )
+-    echo "Launching '$RECOVERY_COMMANDS_LABEL' automatically"
+-    for command in "${RECOVERY_COMMANDS[@]}" ; do
+-        rear_debug && echo "Running RECOVERY_COMMANDS '$command'"
+-        eval "$command"
+-        recovery_command_exit_code=$?
+-        test $recovery_command_exit_code -eq 0 || echo "'eval $command' results exit code $recovery_command_exit_code"
+-    done
+-    if test $recovery_command_exit_code -eq 0 ; then
+-        echo "'$RECOVERY_COMMANDS_LABEL' finished successfully"
+-        choices+=( "$REBOOT_COMMANDS_LABEL" )
+-    else
+-        echo "'$RECOVERY_COMMANDS_LABEL' failed with exit code $recovery_command_exit_code"
+-    fi
+-    PS3="Select what to do "
+-    select choice in "${choices[@]}" ; do
+-        case "$REPLY" in
+-            (1)
+-                # Do not assume the ReaR log file is named rear-$HOSTNAME.log
+-                # the user can have specified any name as LOGFILE:
+-                less /var/log/rear/*
+-                ;;
+-            (2)
+-                echo "" > /etc/issue
+-                echo "" > /etc/motd
+-                break
+-                ;;
+-            (3)
+-                for command in "${REBOOT_COMMANDS[@]}" ; do
+-                    rear_debug && echo "Running REBOOT_COMMANDS '$command'"
+-                    eval "$command" || echo "'eval $command' results exit code $?"
+-                done
+-                # Wait hardcoded 10 seconds to not let this script "just proceed"
+-                # because it would proceed with an iteration of the 'select' loop
+-                # which is not wanted for the normal reboot/poweroff cases
+-                # so we sleep 10 seconds to give reboot/poweroff some time
+-                # to terminate this script while it is idle waiting here
+-                # but in exceptional cases (when REBOOT_COMMANDS did not reboot/poweroff)
+-                # it proceeds after 10 seconds with an iteration of the 'select' loop:
+-                sleep 10
+-                ;;
+-        esac
+-        for (( i=1 ; i <= ${#choices[@]} ; i++ )) ; do
+-            echo "$i) ${choices[$i-1]}"
+-        done
+-    done 2>&1
+-fi
+-
+-# In unattended_recovery mode call RECOVERY_COMMANDS automatically
+-# plus automated calling REBOOT_COMMANDS after successful recovery:
+-if unattended_recovery ; then
+-    choices=( "View Relax-and-Recover log file(s)"
+-              "Login at the rescue system"
+-            )
+-    echo "Launching '$RECOVERY_COMMANDS_LABEL' automatically"
+-    for command in "${RECOVERY_COMMANDS[@]}" ; do
+-        rear_debug && echo "Running RECOVERY_COMMANDS '$command'"
+-        eval "$command"
+-        recovery_command_exit_code=$?
+-        test $recovery_command_exit_code -eq 0 || echo "'eval $command' results exit code $recovery_command_exit_code"
+-    done
+-    if test $recovery_command_exit_code -eq 0 ; then
+-        echo "'$RECOVERY_COMMANDS_LABEL' finished successfully"
+-        echo "'$REBOOT_COMMANDS_LABEL' in $USER_INPUT_INTERRUPT_TIMEOUT seconds (Ctrl-C to interrupt)"
+-        sleep $USER_INPUT_INTERRUPT_TIMEOUT
+-        for command in "${REBOOT_COMMANDS[@]}" ; do
+-            rear_debug && echo "Running REBOOT_COMMANDS '$command'"
+-            eval "$command" || echo "'eval $command' results exit code $?"
+-        done
+-        # Wait hardcoded 10 seconds to not let this script "just proceed"
+-        # because it would show the login screen when this script finished
+-        # which is not wanted for the normal reboot/poweroff cases
+-        # so we sleep 10 seconds to give reboot/poweroff some time
+-        # to terminate this script while it is idle waiting here
+-        # but in exceptional cases (when REBOOT_COMMANDS did not reboot/poweroff)
+-        # it proceeds after 10 seconds with the login screen:
+-        sleep 10
+-    else
+-        echo "'$RECOVERY_COMMANDS_LABEL' failed with exit code $recovery_command_exit_code"
+-        PS3="Select what to do "
+-        select choice in "${choices[@]}" ; do
+-            case "$REPLY" in
+-                (1)
+-                    # Do not assume the ReaR log file is named rear-$HOSTNAME.log
+-                    # the user can have specified any name as LOGFILE:
+-                    less /var/log/rear/*
+-                    ;;
+-                (2)
+-                    echo "" > /etc/issue
+-                    echo "" > /etc/motd
+-                    break
+-                    ;;
+-            esac
+-            for (( i=1 ; i <= ${#choices[@]} ; i++ )) ; do
+-                echo "$i) ${choices[$i-1]}"
+-            done
+-        done 2>&1
+-    fi
+-fi
+
+From 521d4d3f12a176e8ea332c708e16fdd746e5858e Mon Sep 17 00:00:00 2001
+From: Pavel Cahyna <pcahyna@redhat.com>
+Date: Tue, 26 Aug 2025 15:55:32 +0200
+Subject: [PATCH 2/6] Factor out configuration reading in system-setup
+
+The run-automatic-rear script also needs to know the values of some ReaR
+configuration variables and runs in a different shell than the
+system-setup script, so move the sourcing of configuration files to a
+common function.
+---
+ .../skel/default/etc/scripts/system-setup     | 27 ++++-------------
+ .../etc/scripts/system-setup-functions.sh     | 29 +++++++++++++++++++
+ 2 files changed, 35 insertions(+), 21 deletions(-)
+
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup b/usr/share/rear/skel/default/etc/scripts/system-setup
+index dc958cd5ca..154100c9fe 100755
+--- a/usr/share/rear/skel/default/etc/scripts/system-setup
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup
+@@ -21,11 +21,9 @@ source /etc/scripts/system-setup-functions.sh
+ # cf. the 'if rear_debug' part below:
+ sleep 1
+ 
+-# In the rescue system these paths are always like this, either for real or as a symlink to the actual paths:
+-CONFIG_DIR=/etc/rear
+-SHARE_DIR=/usr/share/rear
+-VAR_DIR=/var/lib/rear
+-LOG_DIR=/var/log/rear
++# Set variables like SHARE_DIR, CONFIG_DIR, we will need them soon
++# (also in source_all_config).
++set_rear_paths
+ 
+ # Because "rear recover" won't work without default.conf
+ # we abort when there is no default.conf (or when it is empty),
+@@ -45,22 +43,9 @@ if ! test -s $SHARE_DIR/conf/default.conf ; then
+     exit 1
+ fi
+ 
+-# Set SECRET_OUTPUT_DEV because secret default values are set via
+-#   { VARIABLE='secret value' ; } 2>>/dev/$SECRET_OUTPUT_DEV
+-# cf. https://github.com/rear/rear/pull/3034#issuecomment-1691609782
+-SECRET_OUTPUT_DEV="null"
+-# Sourcing /usr/share/rear/conf/default.conf as we need some variables or arrays
+-# E.g. UDEV_NET_MAC_RULE_FILES is used by script 55-migrate-network-devices.sh
+-source $SHARE_DIR/conf/default.conf || echo -e "\n'source $SHARE_DIR/conf/default.conf' failed with exit code $?"
+-
+-# Sourcing user and rescue configuration as we need some variables
+-# (EXCLUDE_MD5SUM_VERIFICATION right now and other variables in the system setup scripts):
+-# The order of sourcing should be 'site' then 'local' and as last 'rescue'
+-for conf in site local rescue ; do
+-    if test -s $CONFIG_DIR/$conf.conf ; then
+-        source $CONFIG_DIR/$conf.conf || echo -e "\n'source $CONFIG_DIR/$conf.conf' failed with exit code $?"
+-    fi
+-done
++# Source ReaR config files, we need some ReaR variables in this script, even though it is run
++# outside the 'rear' executable itself.
++source_all_config
+ 
+ # Default USER_INPUT_INTERRUPT_TIMEOUT is 30 seconds and default USER_INPUT_UNATTENDED_TIMEOUT is 3 seconds:
+ unattended_recovery && timeout=$USER_INPUT_UNATTENDED_TIMEOUT || timeout=$USER_INPUT_INTERRUPT_TIMEOUT
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup-functions.sh b/usr/share/rear/skel/default/etc/scripts/system-setup-functions.sh
+index e43e5c7f6c..f8d733d40f 100644
+--- a/usr/share/rear/skel/default/etc/scripts/system-setup-functions.sh
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup-functions.sh
+@@ -29,3 +29,32 @@ function automatic_recovery() {
+     done
+     return 1
+ }
++
++function set_rear_paths() {
++    # In the rescue system these paths are always like this, either for real or as a symlink to the actual paths:
++    CONFIG_DIR=/etc/rear
++    SHARE_DIR=/usr/share/rear
++    VAR_DIR=/var/lib/rear
++    LOG_DIR=/var/log/rear
++}
++
++# Sources all configuration files, including default.conf, for use outside ReaR (in the startup script).
++# Call set_rear_paths before calling this function.
++function source_all_config() {
++    # Set SECRET_OUTPUT_DEV because secret default values are set via
++    #   { VARIABLE='secret value' ; } 2>>/dev/$SECRET_OUTPUT_DEV
++    # cf. https://github.com/rear/rear/pull/3034#issuecomment-1691609782
++    SECRET_OUTPUT_DEV="null"
++    # Sourcing /usr/share/rear/conf/default.conf as we need some variables or arrays
++    # E.g. UDEV_NET_MAC_RULE_FILES is used by script 55-migrate-network-devices.sh
++    source $SHARE_DIR/conf/default.conf || echo -e "\n'source $SHARE_DIR/conf/default.conf' failed with exit code $?"
++
++    # Sourcing user and rescue configuration as we need some variables
++    # (EXCLUDE_MD5SUM_VERIFICATION right now and other variables in the system setup scripts):
++    # The order of sourcing should be 'site' then 'local' and as last 'rescue'
++    for conf in site local rescue ; do
++	if test -s $CONFIG_DIR/$conf.conf ; then
++            source $CONFIG_DIR/$conf.conf || echo -e "\n'source $CONFIG_DIR/$conf.conf' failed with exit code $?"
++	fi
++    done
++}
+
+From 4fa97f33c0b2a718e346e09b7b71222113c3ba27 Mon Sep 17 00:00:00 2001
+From: Pavel Cahyna <pcahyna@redhat.com>
+Date: Tue, 26 Aug 2025 16:06:24 +0200
+Subject: [PATCH 3/6] Source ReaR config files in run-automatic-rear
+
+The script uses some ReaR variables (RECOVERY_COMMANDS,
+USER_INPUT_INTERRUPT_TIMEOUT, etc.) and since it is now separate from
+system-setup (it is run independently by a systemd unit or other init
+mechanism), we need to source the configuration also here.
+---
+ usr/share/rear/skel/default/etc/scripts/run-automatic-rear | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/usr/share/rear/skel/default/etc/scripts/run-automatic-rear b/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
+index 76a646c129..dd9999a993 100755
+--- a/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
++++ b/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
+@@ -2,6 +2,11 @@
+ 
+ source /etc/scripts/system-setup-functions.sh
+ 
++# Source ReaR config files, we need some ReaR variables in this script, even though it is run
++# outside the 'rear' executable itself.
++set_rear_paths
++source_all_config
++
+ # Make it explicit that the 'recover' workflow is always verbose (cf. usr/sbin/rear)
+ # so when a 'rear $rear_options recover' command is shown to the user it contains '-v':
+ rear_options='-v'
+
+From 51cfc7dd437f807ea42c300a736a506a1c646346 Mon Sep 17 00:00:00 2001
+From: Pavel Cahyna <pcahyna@redhat.com>
+Date: Tue, 26 Aug 2025 17:54:38 +0200
+Subject: [PATCH 4/6] Do not run automatic recovery on boot if system-setup
+ fails
+
+This matches the behavior before automatic recovery was moved to a
+separate script (run-automatic-rear) and service
+(automatic-rear.service). Implemented by making the
+automatic-rear.service unit require the sysinit.service unit.
+---
+ usr/share/rear/skel/default/etc/scripts/system-setup           | 2 ++
+ .../skel/default/usr/lib/systemd/system/automatic-rear.service | 3 ++-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup b/usr/share/rear/skel/default/etc/scripts/system-setup
+index 154100c9fe..cdd488e751 100755
+--- a/usr/share/rear/skel/default/etc/scripts/system-setup
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup
+@@ -40,6 +40,8 @@ if ! test -s $SHARE_DIR/conf/default.conf ; then
+     # because it does not make sense to run "rear recover" without default.conf:
+     echo -e "\nRelax-and-Recover cannot work without $SHARE_DIR/conf/default.conf\n" >/etc/motd
+     # exiting this script proceeds directly to the login screen:
++    # also execution of unattended/automated recovery is prevented by automatic-rear.service requiring
++    # this one, i.e. depending on its successful execution.
+     exit 1
+ fi
+ 
+diff --git a/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service b/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service
+index ee3187a879..d20c80f7b9 100644
+--- a/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service
++++ b/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service
+@@ -1,7 +1,8 @@
+ [Unit]
+ Description=Run Relax-and-Recover recovery automatically if requested
+ Wants=network-online.target
+-After=network-online.target
++After=network-online.target sysinit.service
++Requires=sysinit.service
+ 
+ [Service]
+ Type=oneshot
+
+From 42a6cc33b8e00d74e32ae199adb82a4bcfdc8dc2 Mon Sep 17 00:00:00 2001
+From: Pavel Cahyna <pcahyna@redhat.com>
+Date: Tue, 26 Aug 2025 18:13:13 +0200
+Subject: [PATCH 5/6] Add back a mention of unattended mode when it executes
+
+Accidentally lost in fec92e291024ccfd329e51ed02265f18713d28b0
+as confirmed in
+https://github.com/rear/rear/pull/3518#issuecomment-3274951380
+---
+ usr/share/rear/skel/default/etc/scripts/run-automatic-rear | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/usr/share/rear/skel/default/etc/scripts/run-automatic-rear b/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
+index dd9999a993..9d2f718091 100755
+--- a/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
++++ b/usr/share/rear/skel/default/etc/scripts/run-automatic-rear
+@@ -76,7 +76,7 @@ if unattended_recovery ; then
+     choices=( "View Relax-and-Recover log file(s)"
+               "Login at the rescue system"
+             )
+-    echo "Launching '$RECOVERY_COMMANDS_LABEL' automatically"
++    echo "Launching '$RECOVERY_COMMANDS_LABEL' automatically in unattended (non-interactive) mode"
+     for command in "${RECOVERY_COMMANDS[@]}" ; do
+         rear_debug && echo "Running RECOVERY_COMMANDS '$command'"
+         eval "$command"
+
+From b21fffbd3b9c4e4180a783276d3c652ed7d9730c Mon Sep 17 00:00:00 2001
+From: Pavel Cahyna <pcahyna@redhat.com>
+Date: Thu, 11 Sep 2025 19:12:48 +0200
+Subject: [PATCH 6/6] Shorten description of automatic-rear.service
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Shorter description will not be truncated when included in system boot
+messages printed on console, resulting in better readability.
+
+Message before: Starting automatic-rear.service - …overy automatically if requested...
+Message after: Starting automatic-rear.service - Automatic recovery if requested...
+---
+ .../skel/default/usr/lib/systemd/system/automatic-rear.service  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service b/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service
+index d20c80f7b9..ef469c5daa 100644
+--- a/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service
++++ b/usr/share/rear/skel/default/usr/lib/systemd/system/automatic-rear.service
+@@ -1,5 +1,5 @@
+ [Unit]
+-Description=Run Relax-and-Recover recovery automatically if requested
++Description=Automatic recovery if requested
+ Wants=network-online.target
+ After=network-online.target sysinit.service
+ Requires=sysinit.service
+

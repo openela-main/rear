@@ -1,0 +1,101 @@
+From bfb6bcd6903d0bff70b4d4e607bb0253bacdd610 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Zaoral?= <lzaoral@redhat.com>
+Date: Mon, 24 Feb 2025 14:16:58 +0100
+Subject: [PATCH 1/2] add bootloader auto-detection for modern PowerNV systems
+
+Modern PowerNV systems do not necessary have the PPC PReP Boot partitions so
+let's fall back on GRUB2 in the case the bootloader was not detected already.
+---
+ .../rear/layout/save/default/445_guess_bootloader.sh      | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/usr/share/rear/layout/save/default/445_guess_bootloader.sh b/usr/share/rear/layout/save/default/445_guess_bootloader.sh
+index f10a3834c2..7e32957547 100644
+--- a/usr/share/rear/layout/save/default/445_guess_bootloader.sh
++++ b/usr/share/rear/layout/save/default/445_guess_bootloader.sh
+@@ -114,6 +114,14 @@ for block_device in /sys/block/* ; do
+     Log "End of strings in the first bytes on $disk_device"
+ done
+ 
++# Default to GRUB2 on ppc64le PowerNV machines if no PPC PReP Boot partitions
++# were found because it is not manadatory to use them in this setup.
++if [ "$ARCH" = "Linux-ppc64le" ] && [ "$(awk '/platform/ {print $NF}' < /proc/cpuinfo)" = "PowerNV" ] ; then
++    LogPrint "Using guessed bootloader 'GRUB2' for 'rear recover' (default for ppc64le PowerNV machines)"
++    echo "GRUB2" >$bootloader_file
++    return
++fi
++
+ # No bootloader detected, but we are using UEFI - there is probably an EFI bootloader
+ if is_true $USING_UEFI_BOOTLOADER ; then
+     if is_grub2_installed ; then
+
+From eda63ba36cc4b73b3cd62a803a233d6590a6dba4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Zaoral?= <lzaoral@redhat.com>
+Date: Mon, 10 Mar 2025 13:53:30 +0100
+Subject: [PATCH 2/2] Linux-ppc64le/660_install_grub2: fix compatibility with
+ PowerNV
+
+Modern PowerNV systems with the OPAL firmware do not require the presence of
+the PPC PReP boot partition [1,2].  Therefore, the installation of GRUB2
+should be made optional on these machines if such partition does not exist.
+
+As long as the GRUB2 configuration is created successfully, Petitboot will be
+able to load it and boot the restored system.  That was already the case, this
+commit just fixes the annoying warning message about a missing bootloader.
+
+[1] https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html-single/automatically_installing_rhel/index#raid_kickstart-commands-for-handling-storage
+[2] https://bugzilla.redhat.com/show_bug.cgi?id=1970432#c2
+---
+ .../Linux-ppc64le/660_install_grub2.sh        | 23 ++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/usr/share/rear/finalize/Linux-ppc64le/660_install_grub2.sh b/usr/share/rear/finalize/Linux-ppc64le/660_install_grub2.sh
+index ed8f024867..6b43bc3b28 100644
+--- a/usr/share/rear/finalize/Linux-ppc64le/660_install_grub2.sh
++++ b/usr/share/rear/finalize/Linux-ppc64le/660_install_grub2.sh
+@@ -85,15 +85,22 @@ if ! test -d "$TARGET_FS_ROOT/boot/$grub_name" ; then
+ fi
+ 
+ # Generate GRUB configuration file anew to be on the safe side (this could be even mandatory in MIGRATION_MODE):
++local grub2_config_generated="yes"
+ if ! chroot $TARGET_FS_ROOT /bin/bash --login -c "$grub_name-mkconfig -o /boot/$grub_name/grub.cfg" ; then
++    grub2_config_generated="no"
++    # TODO: We should make this fatal.  Outdated/incomplete/just wrong grub2.cfg may result into an unbootable system.
+     LogPrintError "Failed to generate boot/$grub_name/grub.cfg in $TARGET_FS_ROOT - trying to install GRUB2 nevertheless"
+ fi
+ 
++# Detect platform, e.g. PowerNV, in advance.
++# An alternative approach, also based on parsing /proc/cpuinfo, can be found in the pseries_platform helper from powerpc-utils.
++grub2_ppc_platform="$(awk '/platform/ {print $NF}' < /proc/cpuinfo)"
++
+ # Do not update nvram when system is running in PowerNV mode (BareMetal).
+ # grub2-install will fail if not run with the --no-nvram option on a PowerNV system,
+ # see https://github.com/rear/rear/pull/1742
+ grub2_no_nvram_option=""
+-if [[ $(awk '/platform/ {print $NF}' < /proc/cpuinfo) == PowerNV ]] ; then
++if [[ "$grub2_ppc_platform" == PowerNV ]] ; then
+     grub2_no_nvram_option="--no-nvram"
+ fi
+ # Also do not update nvram when no character device node /dev/nvram exists.
+@@ -173,6 +180,20 @@ LogPrint "Determining where to install GRUB2 (no GRUB2_INSTALL_DEVICES specified
+ # Find PPC PReP Boot partitions:
+ part_list=$( awk -F ' ' '/^part / {if ($6 ~ /prep/) {print $7}}' $LAYOUT_FILE )
+ if ! test "$part_list" ; then
++    # The PReP Boot partitions are not required on PowerNV systems.
++    if [[ "$grub2_ppc_platform" == "PowerNV" ]] ; then
++        if is_false "$grub2_config_generated" ; then
++            LogPrintError "Booting using Petitboot may not work (failed to generate GRUB configuration file anew)"
++            return 1
++        fi
++
++        LogPrint "PPC PReP boot partition not found - GRUB2 installation is not necessary on PowerNV systems"
++        # As long as the GRUB 2 configuration was generated successfully, the
++        # system will be bootable using Petitboot.
++        NOBOOTLOADER=''
++        return 0
++    fi
++
+     LogPrintError "Cannot install GRUB2 (unable to find a PPC PReP boot partition)"
+     return 1
+ fi
+

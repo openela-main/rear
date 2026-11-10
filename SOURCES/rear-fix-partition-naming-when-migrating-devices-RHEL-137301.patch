@@ -1,0 +1,222 @@
+From b6aa46ed25b83ec4965d98477f34acc7007143c2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Zaoral?= <lzaoral@redhat.com>
+Date: Fri, 18 Oct 2024 16:21:36 +0200
+Subject: [PATCH] Use OS_MASTER_VERSION for major releases (#3331)
+
+Use OS_MASTER_VERSION for major releases, see
+https://github.com/rear/rear/pull/3331
+Contrary to its name, the OS_MASTER_VERSION variable
+was already used for this purpose for some versions, e.g. RHEL 7.
+This fixes version comparison on RHEL 10 and newer.
+Related: https://github.com/rear/rear/issues/3149#issuecomment-1966068640
+Fixes commit: f4932c1cfe13d4a855bec93c1d3aa0b2b9128c6a
+"Add OS version mappings for RHEL 8 and RHEL 9"
+
+(cherry picked from commit b6aa46ed25b83ec4965d98477f34acc7007143c2)
+---
+ usr/share/rear/lib/config-functions.sh | 44 +++++++-------------------
+ 1 file changed, 11 insertions(+), 33 deletions(-)
+
+diff --git a/usr/share/rear/lib/config-functions.sh b/usr/share/rear/lib/config-functions.sh
+index 1838313e33..ff9d8fe8a4 100644
+--- a/usr/share/rear/lib/config-functions.sh
++++ b/usr/share/rear/lib/config-functions.sh
+@@ -110,32 +110,12 @@ See '$SHARE_DIR/lib/config-functions.sh' for more details."
+     case "$( echo $OS_VENDOR_VERSION | tr '[A-Z]' '[a-z]' )" in
+         (*oracle*|*centos*|*fedora*|*redhat*|*scientific*)
+             OS_MASTER_VENDOR="Fedora"
+-            case "$OS_VERSION" in
+-                (5.*)
+-                    # map all RHEL 5.x and clones to Fedora/5
+-                    # this is safe because FedoraCore 5 never existed
+-                    OS_MASTER_VERSION="5"
+-                    ;;
+-                (6.*)
+-                    # map all RHEL 6.x and clones to Fedora/6
+-                    OS_MASTER_VERSION="6"
+-                    ;;
+-                (7.*)
+-                    # map all RHEL 7.x and clones to Fedora/7
+-                    OS_MASTER_VERSION="7"
+-                    ;;
+-                (*)
+-                OS_MASTER_VERSION="$OS_VERSION"
+-                ;;
+-            esac
+             ;;
+         (*ubuntu*|*linuxmint*)
+             OS_MASTER_VENDOR="Debian"
+-            OS_MASTER_VERSION="$OS_VERSION"
+             ;;
+         (*archlinux*)
+             OS_MASTER_VENDOR="Arch"
+-            OS_MASTER_VERSION="$OS_VERSION"
+             ;;
+         (*suse*)
+             # When OS_VENDOR_VERSION contains 'SUSE', set OS_MASTER_VENDOR to 'SUSE'
+@@ -152,18 +124,24 @@ See '$SHARE_DIR/lib/config-functions.sh' for more details."
+             # because then scripts in a .../SUSE_LINUX/... sub-directoriy and conf/SUSE_LINUX.conf
+             # get sourced twice by the (buggy) SourceStage function in lib/framework-functions.sh
+             OS_MASTER_VENDOR="SUSE"
+-            # If OS_VERSION is of the form 12.34.56 OS_MASTER_VERSION is only the first part '12'.
+-            # Because openSUSE Tumbleweed has rolling releases OS_VERSION is a date of the form YYYYMMDD
+-            # so that there is no real OS_MASTER_VERSION which is then the the same as OS_VERSION:
+-            OS_MASTER_VERSION="${OS_VERSION%%.*}"
+             ;;
+         (*)
+             # set fallback values to avoid error exit for 'set -eu' because of unbound variables:
+             OS_MASTER_VENDOR=""
+-            OS_MASTER_VERSION="$OS_VERSION"
+             ;;
+     esac
+ 
++    # Set master version to the MAJOR release version. ReaR assumes that OS_MASTER_VERSION
++    # is just the major release number extracted from OS_VERSION and not the version of the derived OS.
++    # If OS_VERSION is of the form 12.34.56, OS_MASTER_VERSION is only the first part '12'.
++    #
++    # Because openSUSE Tumbleweed has rolling releases, OS_VERSION is a date of the form YYYYMMDD.
++    # Therefore, there is no real OS_MASTER_VERSION and this variable will be set to the same value
++    # as OS_VERSION.
++    #
++    # TODO: Rename the variable to be less confusing, e.g. to OS_VERSION_MAJOR.
++    OS_MASTER_VERSION="${OS_VERSION%%.*}"
++
+     # combined stuff for OS_MASTER_*
+     if [ "$OS_MASTER_VENDOR" ] ; then
+         OS_MASTER_VENDOR_VERSION="$OS_MASTER_VENDOR/$OS_MASTER_VERSION"
+
+From ba835cd47f6abb97ff08814e24f6eb8fa016c1eb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Renaud=20M=C3=A9trich?= <rmetrich@redhat.com>
+Date: Thu, 10 Oct 2024 14:22:18 +0200
+Subject: [PATCH] Fix partition naming on RHEL when migrating devices
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The previous code was appending a "p" to the device name
+unconditionally, which ended up having partition names such as 'wwidp0'
+instead of 'wwid1', when the device name (e.g. 'wwid') ended with a
+letter and not a digit.
+The new code applies the proper naming, which is 'wwid1' when device
+doesn't end with a digit (e.g. 'wwid'), and 'wwid0000p1' when the device
+(e.g. 'wwid0000') ends with a digit.
+
+Code tested in the following cases.
+
+With QEMU SCSI disk ID "0000a":
+~~
+rear> lsblk
+NAME                           MAJ:MIN RM   SIZE RO TYPE  MOUNTPOINTS
+sda                              8:0    0    20G  0 disk
+|-sda1                           8:1    0     1G  0 part
+|-sda2                           8:2    0    19G  0 part
+`-0QEMU_QEMU_HARDDISK_0000a    253:0    0    20G  0 mpath
+  |-0QEMU_QEMU_HARDDISK_0000a1 253:1    0     1G  0 part
+  `-0QEMU_QEMU_HARDDISK_0000a2 253:2    0    19G  0 part
+sdb                              8:16   0    20G  0 disk
+|-sdb1                           8:17   0     1G  0 part
+|-sdb2                           8:18   0    19G  0 part
+`-0QEMU_QEMU_HARDDISK_0000a    253:0    0    20G  0 mpath
+  |-0QEMU_QEMU_HARDDISK_0000a1 253:1    0     1G  0 part
+  `-0QEMU_QEMU_HARDDISK_0000a2 253:2    0    19G  0 part
+sr0                             11:0    1 614.7M  0 rom
+~~
+
+With QEMU SCSI disk ID "0000":
+~~
+rear> lsblk
+NAME                           MAJ:MIN RM   SIZE RO TYPE  MOUNTPOINTS
+sda                              8:0    0    20G  0 disk
+|-sda1                           8:1    0     1G  0 part
+|-sda2                           8:2    0    19G  0 part
+`-0QEMU_QEMU_HARDDISK_0000     253:0    0    20G  0 mpath
+  |-0QEMU_QEMU_HARDDISK_0000p1 253:1    0     1G  0 part
+  `-0QEMU_QEMU_HARDDISK_0000p2 253:2    0    19G  0 part
+sdb                              8:16   0    20G  0 disk
+|-sdb1                           8:17   0     1G  0 part
+|-sdb2                           8:18   0    19G  0 part
+`-0QEMU_QEMU_HARDDISK_0000     253:0    0    20G  0 mpath
+  |-0QEMU_QEMU_HARDDISK_0000p1 253:1    0     1G  0 part
+  `-0QEMU_QEMU_HARDDISK_0000p2 253:2    0    19G  0 part
+sr0                             11:0    1 614.7M  0 rom
+~~
+
+With default friendly name ("mpatha"):
+~~
+rear> lsblk
+NAME        MAJ:MIN RM   SIZE RO TYPE  MOUNTPOINTS
+sda           8:0    0    20G  0 disk
+|-sda1        8:1    0     1G  0 part
+|-sda2        8:2    0    19G  0 part
+`-mpatha    253:0    0    20G  0 mpath
+  |-mpatha1 253:1    0     1G  0 part
+  `-mpatha2 253:2    0    19G  0 part
+sdb           8:16   0    20G  0 disk
+|-sdb1        8:17   0     1G  0 part
+|-sdb2        8:18   0    19G  0 part
+`-mpatha    253:0    0    20G  0 mpath
+  |-mpatha1 253:1    0     1G  0 part
+  `-mpatha2 253:2    0    19G  0 part
+sr0          11:0    1 614.7M  0 rom
+~~
+
+With friendly name ending with a digit ("disk0"):
+~~
+rear> lsblk
+NAME        MAJ:MIN RM   SIZE RO TYPE  MOUNTPOINTS
+sda           8:0    0    20G  0 disk
+|-sda1        8:1    0     1G  0 part
+|-sda2        8:2    0    19G  0 part
+`-disk0     253:0    0    20G  0 mpath
+  |-disk0p1 253:1    0     1G  0 part
+  `-disk0p2 253:2    0    19G  0 part
+sdb           8:16   0    20G  0 disk
+|-sdb1        8:17   0     1G  0 part
+|-sdb2        8:18   0    19G  0 part
+`-disk0     253:0    0    20G  0 mpath
+  |-disk0p1 253:1    0     1G  0 part
+  `-disk0p2 253:2    0    19G  0 part
+sr0          11:0    1 614.7M  0 rom
+~~
+
+Signed-off-by: Renaud Métrich <rmetrich@redhat.com>
+
+(cherry picked from commit ba835cd47f6abb97ff08814e24f6eb8fa016c1eb)
+---
+ usr/share/rear/lib/layout-functions.sh | 22 ++++------------------
+ 1 file changed, 4 insertions(+), 18 deletions(-)
+
+diff --git a/usr/share/rear/lib/layout-functions.sh b/usr/share/rear/lib/layout-functions.sh
+index 191c60a438..e4ac1355b8 100644
+--- a/usr/share/rear/lib/layout-functions.sh
++++ b/usr/share/rear/lib/layout-functions.sh
+@@ -1044,24 +1044,10 @@ function get_part_device_name_format() {
+                 ;;
+ 
+                 (Fedora)
+-                    if is_false "$user_friendly_names" ; then
+-                        # RHEL 7 and above seems to named partitions on multipathed devices with
+-                        # [mpath device UUID/WWID] + p + [part number] when "user_friendly_names"
+-                        # option is FALSE.
+-                        # For example: /dev/mapper/3600507680c82004cf8000000000000d8p1
+-                        part_name="${device_name}p" # append p between main device and partitions
+-                    else
+-                        # RHEL 7 and above seems to named partitions on multipathed devices with
+-                        # [mpath device name] + [part number] like standard disk when "user_friendly_names"
+-                        # option is used (default).
+-                        # For example: /dev/mapper/mpatha1
+-                        # But the scheme in RHEL 6 need a "p" between [mpath device name] and [part number].
+-                        # For exemple: /dev/mapper/mpathap1
+-                        if (( $OS_MASTER_VERSION < 7 )) ; then
+-                            part_name="${device_name}p" # append p between main device and partitions
+-                        else
+-                            part_name="${device_name}"
+-                        fi
++                    # RHEL 7 and above add a "p" after the device name when the device name ends
++                    # by a digit, see https://access.redhat.com/solutions/2354631.
++                    if (( $OS_MASTER_VERSION < 7 )) || [[ ${device_name: -1} =~ [0-9] ]]; then
++                        part_name="${device_name}p"
+                     fi
+                 ;;
+ 
+

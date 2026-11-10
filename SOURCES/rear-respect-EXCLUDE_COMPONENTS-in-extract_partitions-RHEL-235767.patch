@@ -1,0 +1,114 @@
+From 626701843a32070080856c960b9e4202102b81d1 Mon Sep 17 00:00:00 2001
+From: Johannes Meixner <jsmeix@suse.com>
+Date: Fri, 25 Apr 2025 13:27:41 +0200
+Subject: [PATCH] EXCLUDE_COMPONENTS in 200_partition_layout.sh (#3455)
+
+In layout/save/GNU/Linux/200_partition_layout.sh
+do not Error() exit but only DebugPrint
+when extract_partitions() is called for a disk
+which is specified in EXCLUDE_COMPONENTS
+see https://github.com/rear/rear/pull/3455#issuecomment-2821188937
+In default.conf describe how EXCLUDE_COMPONENTS
+could be used to exclude unneeded normal disks
+and even unneeded problematic disks
+when the disk or things on it cannot be recognized properly,
+e.g. if 'parted' fails to recognize the partition table
+as in https://github.com/rear/rear/issues/3433
+and https://github.com/rear/rear/issues/2995
+Also describe generically how to exclude a problematic disk
+with higher level storage objects on it.
+
+(cherry-picked from commit 626701843a32070080856c960b9e4202102b81d1)
+---
+ usr/share/rear/conf/default.conf              | 43 +++++++++++++------
+ .../save/GNU/Linux/200_partition_layout.sh    | 30 +++++++++++--
+ 2 files changed, 56 insertions(+), 17 deletions(-)
+
+diff --git a/usr/share/rear/conf/default.conf b/usr/share/rear/conf/default.conf
+index 8cddbb72a5..7f5a959984 100644
+--- a/usr/share/rear/conf/default.conf
++++ b/usr/share/rear/conf/default.conf
+@@ -3483,22 +3483,25 @@ DIRECTORY_ENTRIES_TO_RECOVER=()
+ ##
+ # How to exclude something ----- EXCLUDES -------
+ #
+-# You cannot exclude a device (e.g. /dev/sdg) directly. Instead you have to exclude everything
+-# ON that device and then the dependency tracker will automatically exclude the device from the
+-# recovery (because there won't be any recovery information for that "unnecessary" device).
+-#
+-# Furthermore, you have to exclude MD devices and LVM2 volume groups separately
++# Normally a whole device (e.g. a disk device /dev/sdX) is not excluded directly
++# (for exceptional cases see EXCLUDE_COMPONENTS below).
++# Instead specific things on a device are excluded.
++# When everything on a device is excluded then via the dependency tracker
++# the whole device gets automatically excluded from the recovery
++# because there is no recovery information left for that device.
++#
++# You have to exclude MD devices and LVM2 volume groups separately
+ # as there is no automatic detection of these dependencies.
+ 
+-# Exclude filesystems by specifying their mountpoints. Will be automatically added to the
+-# $BACKUP_PROG_EXCLUDE array during backup to prevent the excluded filesystems' data to
+-# be backed up
+-# examples: /tmp
++# Exclude filesystems by specifying their mountpoints.
++# Will be automatically added to the $BACKUP_PROG_EXCLUDE array during backup
++# to prevent the excluded filesystems' data to be backed up.
++# Examples: /tmp
+ #           /media/bigdisk
+ EXCLUDE_MOUNTPOINTS=()
+ 
+ # Exclude MD devices
+-# examples: /dev/md0
++# Examples: /dev/md0
+ #           /dev/md/0
+ EXCLUDE_MD=()
+ 
+@@ -3508,13 +3511,27 @@ EXCLUDE_MD=()
+ # otherwise "rear recover" would try to recreate the filesystems onto non-existing LVs.
+ EXCLUDE_VG=()
+ 
+-# Exclude any component from the recovery image.
++# EXCLUDE_COMPONENTS: Exclude any component from the recovery.
+ # Some component types need a prefix:
+ # - filesystems: "fs:/var/cache"
+ # - physical volumes: "pv:/dev/sda2"
+ # - swap: "swap:/dev/mapper/system-swap"
+ # Volume groups look like: "/dev/system".
+-# If in doubt about the correct syntax, consult /var/lib/rear/layout/disktodo.conf
++# See /var/lib/rear/layout/disktodo.conf for the correct syntax of a specific component.
++# Because EXCLUDE_COMPONENTS excludes any component from the recovery
++# it can be used in exceptional cases to exclude unwanted whole disks.
++# For example EXCLUDE_COMPONENTS+=( /dev/sdX ) excludes the disk /dev/sdX
++# and via the dependency tracker usually also partitions and filesystems on it
++# provided the diks behaves normally (i.e. the disk and things on it can be recognized properly).
++# To exclude an unneeded problematic disk when the disk or things on it cannot be recognized properly
++# EXCLUDE_COMPONENTS+=( /dev/sdX ) may work to exclude the disk with its partitions and filesystems.
++# To exclude a problematic disk with higher level storage objects on it
++# its matching components may have to be specified separately for example like
++# EXCLUDE_COMPONENTS+=( /dev/sdX fs:/mountpoint pv:/dev/sdXN ) or similar as needed.
++# Verify that all what belongs to /dev/sdX is marked as 'done' in /var/lib/rear/layout/disktodo.conf
++# and that all what belongs to /dev/sdX is commented out in /var/lib/rear/layout/disklayout.conf
++# to ensure there is no recovery information left as 'todo' or not commented out
++# for a disk which should be excluded from the recovery.
+ EXCLUDE_COMPONENTS=()
+ 
+ ####
+diff --git a/usr/share/rear/layout/save/GNU/Linux/200_partition_layout.sh b/usr/share/rear/layout/save/GNU/Linux/200_partition_layout.sh
+index ec67541e6d..f6b7fdd914 100644
+--- a/usr/share/rear/layout/save/GNU/Linux/200_partition_layout.sh
++++ b/usr/share/rear/layout/save/GNU/Linux/200_partition_layout.sh
+@@ -122,7 +122,11 @@ extract_partitions() {
+     # Ensure $disk_label is valid to determine the partition name/type in the next step at 'declare type'
+     # cf. https://github.com/rear/rear/issues/2801#issuecomment-1122015129
+     if ! [[ "$disk_label" = "msdos" || "$disk_label" = "gpt" || "$disk_label" = "gpt_sync_mbr" || "$disk_label" = "dasd" ]] ; then
+-        Error "Unsupported partition table '$disk_label' (must be one of 'msdos' 'gpt' 'gpt_sync_mbr' 'dasd')"
++        if IsInArray "$device" "${EXCLUDE_COMPONENTS[@]}" ; then
++            DebugPrint "Unsupported partition table '$disk_label' on $device (must be one of 'msdos' 'gpt' 'gpt_sync_mbr' 'dasd')"
++        else
++            Error "Unsupported partition table '$disk_label' on $device (must be one of 'msdos' 'gpt' 'gpt_sync_mbr' 'dasd')"
++        fi
+     fi
+ 
+ 
+

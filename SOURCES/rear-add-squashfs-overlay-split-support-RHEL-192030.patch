@@ -1,0 +1,1042 @@
+From e95afd1c8580454451fb791991b30839be3141b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Renaud=20M=C3=A9trich?=
+ <1163635+rmetrich@users.noreply.github.com>
+Date: Thu, 23 Jul 2026 10:25:11 +0200
+Subject: [PATCH] Add REAR_INITRD_OVERLAY to split initramfs into core +
+ SquashFS overlay (#3614)
+
+* Add REAR_INITRD_OVERLAY to split initramfs into core + SquashFS overlay
+
+On systems where the initramfs is very large
+(e.g. 559 MiB on RHEL 10 due to firmware and kernel modules),
+some hardware or bootloader configurations fail to load it into memory.
+This new opt-in feature splits the recovery system
+into a small initramfs (~100 MiB) and a SquashFS overlay image
+containing all firmware files and non-essential kernel modules.
+
+The initramfs retains only essential kernel modules
+needed to access the overlay at boot time.
+Which modules are kept depends on the output method
+and the MODULES setting:
+
+- When MODULES=('all_modules') (default), entire driver categories are
+  kept based on the output method:
+  - ISO:  storage controllers, CD/DVD, USB, Hyper-V, iso9660/udf
+  - USB:  storage controllers, USB, Hyper-V, ext4/jbd2
+  - PXE:  network drivers
+  - s390: entire kernel/drivers/s390 tree (cio bus layer + all s390 drivers)
+
+- When MODULES is restricted (loaded_modules, empty, or explicit list),
+  only currently loaded modules plus a small set needed for overlay access
+  are kept (loop, squashfs, isofs, etc.). This avoids including unneeded
+  drivers like hv_storvsc on non-Hyper-V systems.
+
+Module dependencies are automatically resolved via
+modprobe --show-depends and pulled into the initramfs.
+Firmware files required by essential modules are auto-detected via
+modinfo -F firmware (supports .xz/.zst compressed firmware).
+The REAR_INITRD_FIRMWARE_FILES array allows
+manually specifying additional firmware patterns
+for drivers that don't declare dependencies.
+
+The prep script adds overlay-access modules (loop, squashfs, isofs, etc.)
+to MODULES_LOAD so they are included even when MODULES is restrictive.
+
+Two apply modes are supported via REAR_INITRD_OVERLAY in local.conf:
+
+- "copy": overlay content is copied into tmpfs at boot, then the source
+  device is unmounted. Simple and robust.
+- "mount": overlay is kept mounted via overlayfs on /usr/lib/firmware and
+  /usr/lib/modules, reading data on-demand. Saves RAM but requires the
+  source device to stay accessible.
+
+At boot time, the overlay script (02-mount-rear-overlay.sh) starts udev
+to auto-detect hardware and load matching drivers from the initramfs.
+After the overlay is applied, udev is retriggered to detect hardware
+that needs modules from the overlay. The script then stops udev so the
+regular 40-start-udev-or-load-modules.sh can manage it from there.
+
+For GRUB_RESCUE, the overlay is copied to /boot and the kernel cmdline
+includes rear_overlay=UUID=<boot-uuid>:<path>. The /boot filesystem type
+and storage driver are detected once in the prep stage and reused by both
+the pack and output stages.
+
+For PXE, the overlay URL is passed via rear_overlay=<tftp/http url> in
+the kernel cmdline. The boot script brings up the network using the
+auto-generated 60-network-devices.sh and 62-routing.sh scripts, then
+downloads the overlay with curl.
+
+Requires mksquashfs (squashfs-tools package) on the build system.
+PXE mode also requires curl.
+
+* Move md5sums creation from build to pack stage
+
+Move build/default/995_md5sums_rootfs.sh
+to pack/GNU/Linux/800_md5sums_rootfs.sh
+so that md5sums are computed once
+on the final rootfs content, after any modifications
+like the overlay split in 500_create_rear_overlay.sh.
+
+This eliminates the need to regenerate md5sums
+in the overlay script and ensures md5sums
+always match what ends up in the initramfs.
+
+The module metadata exclusion (modules.dep, modules.alias, etc.)
+is included unconditionally since depmod regenerates these at boot time.
+
+---------
+
+Co-authored-by: Claude Opus 4.6 (1M context)
+---
+ usr/share/rear/conf/default.conf              |  46 ++-
+ usr/share/rear/lib/bootloader-functions.sh    |  10 +-
+ .../output/ISO/Linux-i386/800_create_isofs.sh |   6 +
+ .../output/PXE/default/800_copy_to_tftp.sh    |  11 +
+ .../output/PXE/default/801_copy_to_http.sh    |   7 +
+ .../PXE/default/810_create_pxelinux_cfg.sh    |   2 +-
+ .../USB/default/830_copy_kernel_initrd.sh     |   6 +
+ .../rear/output/default/940_grub2_rescue.sh   |  19 +-
+ .../pack/GNU/Linux/500_create_rear_overlay.sh | 316 ++++++++++++++++++
+ .../GNU/Linux/800_md5sums_rootfs.sh}          |  13 +-
+ .../prep/default/395_include_overlay_tools.sh |  35 ++
+ .../skel/default/etc/scripts/system-setup     |   2 +-
+ .../system-setup.d/02-mount-rear-overlay.sh   | 257 ++++++++++++++
+ 13 files changed, 715 insertions(+), 15 deletions(-)
+ create mode 100644 usr/share/rear/pack/GNU/Linux/500_create_rear_overlay.sh
+ rename usr/share/rear/{build/default/995_md5sums_rootfs.sh => pack/GNU/Linux/800_md5sums_rootfs.sh} (83%)
+ create mode 100644 usr/share/rear/prep/default/395_include_overlay_tools.sh
+ create mode 100644 usr/share/rear/skel/default/etc/scripts/system-setup.d/02-mount-rear-overlay.sh
+
+diff --git a/usr/share/rear/conf/default.conf b/usr/share/rear/conf/default.conf
+index 556e345f0..1926c1de1 100644
+--- a/usr/share/rear/conf/default.conf
++++ b/usr/share/rear/conf/default.conf
+@@ -2220,7 +2220,7 @@ NON_FATAL_BINARIES_WITH_MISSING_LIBRARY=''
+ # EXCLUDE_MD5SUM_VERIFICATION
+ #
+ # What files should be excluded from being verified during recovery system startup.
+-# During "rear mkrescue/mkbackup" the build/default/995_md5sums_rootfs.sh script
++# During "rear mkrescue/mkbackup" the pack/GNU/Linux/800_md5sums_rootfs.sh script
+ # creates md5sums for all regular files in the ReaR rescue/recovery system
+ # and stores the result as /md5sums.txt in the ReaR rescue/recovery system.
+ # During recovery system startup the md5sums of the files in /md5sums.txt are verified.
+@@ -2240,7 +2240,7 @@ NON_FATAL_BINARIES_WITH_MISSING_LIBRARY=''
+ # The by default empty EXCLUDE_MD5SUM_VERIFICATION means that certain files
+ # get excluded where it is known that their md5sum verification will fail
+ # (i.e. the already known false positives are excluded by default).
+-# For details see the build/default/995_md5sums_rootfs.sh
++# For details see the pack/GNU/Linux/800_md5sums_rootfs.sh
+ # and skel/default/etc/scripts/system-setup scripts.
+ EXCLUDE_MD5SUM_VERIFICATION=''
+ 
+@@ -4176,6 +4176,48 @@ EFI_STUB_EFIBOOTMGR_ARGS=
+ # see https://github.com/rear/rear/pull/1182#issuecomment-282252770
+ REAR_INITRD_COMPRESSION=""
+ 
++# REAR_INITRD_OVERLAY
++# Split the recovery system into a small initramfs and a SquashFS overlay.
++# The initramfs keeps only essential kernel modules needed to access the overlay
++# at boot time. All firmware files and remaining kernel modules are moved into
++# the SquashFS overlay.
++# For ISO output: the initramfs keeps storage/CD/DVD/USB drivers to mount the ISO.
++# For PXE output: the initramfs keeps network drivers; the overlay is downloaded
++#                 from the TFTP/HTTP server via curl. The overlay URL is passed in
++#                 the kernel cmdline as rear_overlay=<url>.
++# This drastically reduces the initramfs size that the bootloader must load into
++# memory, avoiding boot failures on hardware or firmware with limited memory for
++# initrd loading.
++# Requires 'mksquashfs' (from the squashfs-tools package) on the build system.
++# For PXE output, also requires 'curl' on the build system.
++# Supported with OUTPUT=ISO, OUTPUT=PXE and OUTPUT=USB.
++# Supported values:
++# ""              disabled (default)
++# "copy"          at boot, the overlay content is copied into the rescue system
++#                 tmpfs. Simple and robust, but uses the same total RAM as a full
++#                 initramfs. For ISO the device is unmounted after copy. For PXE the
++#                 downloaded file is removed after copy to free RAM.
++# "mount"         at boot, the overlay is kept mounted via overlayfs. Firmware and
++#                 modules are read on-demand from the SquashFS image, saving RAM.
++#                 For ISO the device must stay accessible during the recovery session.
++#                 For PXE the downloaded file stays in /tmp.
++REAR_INITRD_OVERLAY=""
++
++# REAR_INITRD_FIRMWARE_FILES
++# Only meaningful when REAR_INITRD_OVERLAY is enabled.
++# Additional firmware files to keep in the initramfs instead of moving them
++# to the overlay. This is a safety net for drivers that do not properly
++# declare their firmware requirements via modinfo and would therefore not be
++# auto-detected by the overlay split.
++# Firmware files required by the essential kernel modules are auto-detected
++# (via modinfo -F firmware) and kept automatically - this array is only needed
++# for cases where that detection is incomplete.
++# Supports glob patterns matched against the firmware directory tree.
++# Examples:
++#   REAR_INITRD_FIRMWARE_FILES=( 'bnx2/*' 'tigon/*' )
++#   REAR_INITRD_FIRMWARE_FILES=( '*myvendor*' )
++REAR_INITRD_FIRMWARE_FILES=()
++
+ ##
+ # USE_RAMDISK
+ #
+diff --git a/usr/share/rear/lib/bootloader-functions.sh b/usr/share/rear/lib/bootloader-functions.sh
+index 22e71fe30..a78590df7 100644
+--- a/usr/share/rear/lib/bootloader-functions.sh
++++ b/usr/share/rear/lib/bootloader-functions.sh
+@@ -840,11 +840,13 @@ function make_pxelinux_config {
+     echo "${BACKUP:+BACKUP=$BACKUP} ${OUTPUT:+OUTPUT=$OUTPUT} ${BACKUP_URL:+BACKUP_URL=$BACKUP_URL}"
+     echo "ENDTEXT"
+     echo "    kernel $PXE_KERNEL"
+-    echo "    append initrd=$PXE_INITRD root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $PXE_RECOVER_MODE"
++    local pxe_overlay_opt=""
++    test "$PXE_OVERLAY" && test "$PXE_TFTP_IP" && pxe_overlay_opt="rear_overlay=tftp://$PXE_TFTP_IP/$PXE_OVERLAY"
++    echo "    append initrd=$PXE_INITRD root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $PXE_RECOVER_MODE $pxe_overlay_opt"
+     echo "say ----------------------------------------------------------"
+ 
+     # start with optional rear http entry if specified
+-    if [[ "$PXE_HTTP_DOWNLOAD_URL" ]] ; then    
++    if [[ "$PXE_HTTP_DOWNLOAD_URL" ]] ; then
+         case "$PXE_RECOVER_MODE" in
+         "automatic")
+             echo "say rear-automatic-http - Recover $HOSTNAME (HTTP) with auto-recover kernel option"
+@@ -867,7 +869,9 @@ function make_pxelinux_config {
+         echo "${BACKUP:+BACKUP=$BACKUP} ${OUTPUT:+OUTPUT=$OUTPUT} ${BACKUP_URL:+BACKUP_URL=$BACKUP_URL}"
+         echo "ENDTEXT"
+         echo "    kernel $PXE_HTTP_DOWNLOAD_URL/$PXE_KERNEL"
+-        echo "    append initrd=$PXE_HTTP_DOWNLOAD_URL/$PXE_INITRD root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $PXE_RECOVER_MODE"
++        local pxe_http_overlay_opt=""
++        test "$PXE_OVERLAY" && pxe_http_overlay_opt="rear_overlay=$PXE_HTTP_DOWNLOAD_URL/$PXE_OVERLAY"
++        echo "    append initrd=$PXE_HTTP_DOWNLOAD_URL/$PXE_INITRD root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $PXE_RECOVER_MODE $pxe_http_overlay_opt"
+         echo "say ----------------------------------------------------------"
+     fi
+ 
+diff --git a/usr/share/rear/output/ISO/Linux-i386/800_create_isofs.sh b/usr/share/rear/output/ISO/Linux-i386/800_create_isofs.sh
+index ca017e3d6..dfb9281d3 100644
+--- a/usr/share/rear/output/ISO/Linux-i386/800_create_isofs.sh
++++ b/usr/share/rear/output/ISO/Linux-i386/800_create_isofs.sh
+@@ -17,6 +17,12 @@ else
+     cp $v $TMP_DIR/$REAR_INITRD_FILENAME $TMP_DIR/isofs/isolinux/$REAR_INITRD_FILENAME || Error "Failed to copy initrd '$REAR_INITRD_FILENAME'"
+ fi
+ 
++# Copy overlay squashfs if present (created by pack/GNU/Linux/500_create_rear_overlay.sh)
++if test -f "$TMP_DIR/rear-overlay.sqsh" ; then
++    Log "Copying overlay squashfs to ISO filesystem"
++    cp $v "$TMP_DIR/rear-overlay.sqsh" "$TMP_DIR/isofs/isolinux/rear-overlay.sqsh" || Error "Failed to copy overlay 'rear-overlay.sqsh'"
++fi
++
+ #ISO_FILES+=( $TMP_DIR/kernel $TMP_DIR/$REAR_INITRD_FILENAME )
+ # in case the user populates this array manually we must not forget to copy
+ # these files to our temporary isofs
+diff --git a/usr/share/rear/output/PXE/default/800_copy_to_tftp.sh b/usr/share/rear/output/PXE/default/800_copy_to_tftp.sh
+index aa649f47b..99469cf26 100644
+--- a/usr/share/rear/output/PXE/default/800_copy_to_tftp.sh
++++ b/usr/share/rear/output/PXE/default/800_copy_to_tftp.sh
+@@ -36,9 +36,20 @@ fi
+ cp -L $v "$KERNEL_FILE" "$pxe_tftp_local_path/$PXE_KERNEL" || Error "Failed to copy KERNEL_FILE '$KERNEL_FILE'"
+ cp -L $v "$TMP_DIR/$REAR_INITRD_FILENAME" "$pxe_tftp_local_path/$PXE_INITRD" || Error "Failed to copy initrd '$REAR_INITRD_FILENAME'"
+ echo "$VERSION_INFO" >"$pxe_tftp_local_path/$PXE_MESSAGE"
++# Copy overlay squashfs if present (created by pack/GNU/Linux/500_create_rear_overlay.sh)
++if test -f "$TMP_DIR/rear-overlay.sqsh" ; then
++    if [[ "$PXE_TFTP_UPLOAD_URL" ]] ; then
++        PXE_OVERLAY="$OUTPUT_PREFIX_PXE/${PXE_TFTP_PREFIX}rear-overlay.sqsh"
++    else
++        PXE_OVERLAY="${PXE_TFTP_PREFIX}rear-overlay.sqsh"
++    fi
++    cp -L $v "$TMP_DIR/rear-overlay.sqsh" "$pxe_tftp_local_path/$PXE_OVERLAY" || Error "Failed to copy overlay 'rear-overlay.sqsh'"
++fi
++
+ # files must be readable for others for PXE
+ # files should be writebale by owner or overwriting it on later runs will fail
+ chmod 644 "$pxe_tftp_local_path/$PXE_KERNEL" "$pxe_tftp_local_path/$PXE_INITRD" "$pxe_tftp_local_path/$PXE_MESSAGE"
++test -f "$pxe_tftp_local_path/$PXE_OVERLAY" && chmod 644 "$pxe_tftp_local_path/$PXE_OVERLAY"
+ 
+ if [[ "$PXE_TFTP_UPLOAD_URL" ]] && [[ "$PXE_RECOVER_MODE" = "unattended" ]] ; then
+     # If we have chosen for "unattended" recover mode then we also copy the
+diff --git a/usr/share/rear/output/PXE/default/801_copy_to_http.sh b/usr/share/rear/output/PXE/default/801_copy_to_http.sh
+index 309f6ecc6..c1259812c 100644
+--- a/usr/share/rear/output/PXE/default/801_copy_to_http.sh
++++ b/usr/share/rear/output/PXE/default/801_copy_to_http.sh
+@@ -36,9 +36,16 @@ PXE_MESSAGE="$OUTPUT_PREFIX_PXE/${PXE_TFTP_PREFIX}message"
+ cp -L $v "$KERNEL_FILE" "$pxe_http_local_path/$PXE_KERNEL" || Error "Failed to copy KERNEL_FILE '$KERNEL_FILE'"
+ cp -L $v "$TMP_DIR/$REAR_INITRD_FILENAME" "$pxe_http_local_path/$PXE_INITRD" || Error "Failed to copy initrd '$REAR_INITRD_FILENAME'"
+ echo "$VERSION_INFO" >"$pxe_http_local_path/$PXE_MESSAGE"
++# Copy overlay squashfs if present
++if test -f "$TMP_DIR/rear-overlay.sqsh" ; then
++    PXE_OVERLAY="$OUTPUT_PREFIX_PXE/${PXE_TFTP_PREFIX}rear-overlay.sqsh"
++    cp -L $v "$TMP_DIR/rear-overlay.sqsh" "$pxe_http_local_path/$PXE_OVERLAY" || Error "Failed to copy overlay 'rear-overlay.sqsh'"
++fi
++
+ # files must be readable for others for PXE
+ # files should be writebale by owner or overwriting it on later runs will fail
+ chmod 644 "$pxe_http_local_path/$PXE_KERNEL" "$pxe_http_local_path/$PXE_INITRD" "$pxe_http_local_path/$PXE_MESSAGE"
++test -f "$pxe_http_local_path/$PXE_OVERLAY" && chmod 644 "$pxe_http_local_path/$PXE_OVERLAY"
+ 
+ LogPrint "Copied kernel+initrd $( du -shc $KERNEL_FILE "$TMP_DIR/$REAR_INITRD_FILENAME" | tail -n 1 | tr -s "\t " " " | cut -d " " -f 1 ) to $PXE_HTTP_UPLOAD_URL/$OUTPUT_PREFIX_PXE"
+ umount_url "$PXE_HTTP_UPLOAD_URL" "$BUILD_DIR/httpbootfs"
+diff --git a/usr/share/rear/output/PXE/default/810_create_pxelinux_cfg.sh b/usr/share/rear/output/PXE/default/810_create_pxelinux_cfg.sh
+index 868e03ea0..67cdbd70d 100644
+--- a/usr/share/rear/output/PXE/default/810_create_pxelinux_cfg.sh
++++ b/usr/share/rear/output/PXE/default/810_create_pxelinux_cfg.sh
+@@ -43,7 +43,7 @@ else
+     say rear = disaster recover this system with Relax-and-Recover
+     label rear
+     kernel $OUTPUT_PREFIX_PXE/$PXE_KERNEL
+-    append initrd=$OUTPUT_PREFIX_PXE/$PXE_INITRD root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $PXE_RECOVER_MODE
++    append initrd=$OUTPUT_PREFIX_PXE/$PXE_INITRD root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $PXE_RECOVER_MODE${PXE_OVERLAY:+${PXE_TFTP_IP:+ rear_overlay=tftp://$PXE_TFTP_IP/$PXE_OVERLAY}}
+ EOF
+ fi
+ 
+diff --git a/usr/share/rear/output/USB/default/830_copy_kernel_initrd.sh b/usr/share/rear/output/USB/default/830_copy_kernel_initrd.sh
+index 347b7f47c..ae8327dda 100644
+--- a/usr/share/rear/output/USB/default/830_copy_kernel_initrd.sh
++++ b/usr/share/rear/output/USB/default/830_copy_kernel_initrd.sh
+@@ -5,6 +5,12 @@ cp -pL $v "$KERNEL_FILE" "$BUILD_DIR/outputfs/$USB_PREFIX/kernel" >&2 || Error "
+ 
+ cp -p $v "$TMP_DIR/$REAR_INITRD_FILENAME" "$BUILD_DIR/outputfs/$USB_PREFIX/$REAR_INITRD_FILENAME" >&2 || Error "Could not create $BUILD_DIR/outputfs/$USB_PREFIX/$REAR_INITRD_FILENAME"
+ 
++# Copy overlay squashfs if present (created by pack/GNU/Linux/500_create_rear_overlay.sh)
++if test -f "$TMP_DIR/rear-overlay.sqsh" ; then
++    cp -p $v "$TMP_DIR/rear-overlay.sqsh" "$BUILD_DIR/outputfs/$USB_PREFIX/rear-overlay.sqsh" >&2 || Error "Could not copy overlay to $USB_PREFIX/rear-overlay.sqsh"
++    Log "Copied rear-overlay.sqsh to $USB_PREFIX"
++fi
++
+ Log "Copied kernel and $REAR_INITRD_FILENAME to $USB_PREFIX"
+ 
+ # Copy current unfinished logfile to USB dir for debug purpose.
+diff --git a/usr/share/rear/output/default/940_grub2_rescue.sh b/usr/share/rear/output/default/940_grub2_rescue.sh
+index 56e995d18..261cd1142 100644
+--- a/usr/share/rear/output/default/940_grub2_rescue.sh
++++ b/usr/share/rear/output/default/940_grub2_rescue.sh
+@@ -49,6 +49,8 @@ local boot_kernel_name="rear-kernel"
+ local boot_initrd_name="rear-$REAR_INITRD_FILENAME"
+ local boot_kernel_file="$boot_dir/$boot_kernel_name"
+ local boot_initrd_file="$boot_dir/$boot_initrd_name"
++local boot_overlay_name="rear-overlay.sqsh"
++local boot_overlay_file="$boot_dir/$boot_overlay_name"
+ local grub_config_dir="$boot_dir/grub${grub_num}"
+ 
+ # Esure there is sufficient disk space available in /boot for the local Relax-and-Recover rescue system:
+@@ -58,12 +60,12 @@ function total_filesize {
+ # Free space in /boot:
+ local free_space=$( df -Pkl $boot_dir | awk 'END { print $4 * 1024 }' )
+ # Used space by an already existing Relax-and-Recover rescue system in /boot:
+-local already_used_space=$( total_filesize $boot_kernel_file $boot_initrd_file )
++local already_used_space=$( total_filesize $boot_kernel_file $boot_initrd_file $boot_overlay_file )
+ # Available space is the free space plus what an already existing Relax-and-Recover rescue system uses
+ # because an already existing Relax-and-Recover rescue system would be overwritten:
+ local available_space=$(( free_space + already_used_space ))
+ # Required space for the new Relax-and-Recover rescue system:
+-local required_space=$( total_filesize $KERNEL_FILE $initrd_file )
++local required_space=$( total_filesize $KERNEL_FILE $initrd_file $TMP_DIR/rear-overlay.sqsh )
+ if (( available_space < required_space )) ; then
+     required_MiB=$(( required_space / 1024 / 1024 ))
+     available_MiB=$(( available_space / 1024 / 1024 ))
+@@ -164,7 +166,9 @@ if is_true $USING_UEFI_BOOTLOADER ; then
+         echo "menuentry '$grub_rear_menu_entry_name' --class os {"
+         echo "          search --no-floppy --fs-uuid --set=root $grub_boot_uuid"
+         echo "          echo 'Loading kernel $boot_kernel_file ...'"
+-        echo "          linux $grub_boot_dir/$boot_kernel_name root=UUID=$root_uuid $KERNEL_CMDLINE"
++    local grub_rescue_overlay_opt=""
++    test -f "$TMP_DIR/rear-overlay.sqsh" && grub_rescue_overlay_opt="rear_overlay=UUID=$grub_boot_uuid:$grub_boot_dir/$boot_overlay_name"
++        echo "          linux $grub_boot_dir/$boot_kernel_name root=UUID=$root_uuid $KERNEL_CMDLINE $grub_rescue_overlay_opt"
+         echo "          echo 'Loading initrd $boot_initrd_file (may take a while) ...'"
+         echo "          initrd $grub_boot_dir/$boot_initrd_name"
+         echo "}"
+@@ -244,9 +248,11 @@ else
+     else
+         echo "menuentry '$grub_rear_menu_entry_name' --class os {" >> $grub_rear_menu_entry_file
+     fi
++    local grub_rescue_overlay_opt=""
++    test -f "$boot_overlay_file" && grub_rescue_overlay_opt="rear_overlay=UUID=$grub_boot_uuid:$grub_boot_dir/$boot_overlay_name"
+       ( echo "          search --no-floppy --fs-uuid --set=root $grub_boot_uuid"
+         echo "          echo 'Loading kernel $boot_kernel_file ...'"
+-        echo "          linux $grub_boot_dir/$boot_kernel_name root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE"
++        echo "          linux $grub_boot_dir/$boot_kernel_name root=/dev/ram0 vga=normal rw $KERNEL_CMDLINE $grub_rescue_overlay_opt"
+         echo "          echo 'Loading initrd $boot_initrd_file (may take a while) ...'"
+         echo "          initrd $grub_boot_dir/$boot_initrd_name"
+         echo "}"
+@@ -271,6 +277,11 @@ else
+     fi
+ fi
+ 
++# Copy overlay squashfs to /boot if present (created by pack/GNU/Linux/500_create_rear_overlay.sh)
++if test -f "$TMP_DIR/rear-overlay.sqsh" ; then
++    cp -af $v "$TMP_DIR/rear-overlay.sqsh" "$boot_overlay_file" || BugError "Failed to copy overlay to '$boot_overlay_file'"
++fi
++
+ # Provide the kernel as boot_kernel_file (i.e. /boot/rear-kernel):
+ if [[ $( stat -L -c '%d' $KERNEL_FILE ) == $( stat -L -c '%d' $boot_dir/ ) ]] ; then
+     # Hardlink file, if possible:
+diff --git a/usr/share/rear/pack/GNU/Linux/500_create_rear_overlay.sh b/usr/share/rear/pack/GNU/Linux/500_create_rear_overlay.sh
+new file mode 100644
+index 000000000..2a1f3cb86
+--- /dev/null
++++ b/usr/share/rear/pack/GNU/Linux/500_create_rear_overlay.sh
+@@ -0,0 +1,316 @@
++
++# 500_create_rear_overlay.sh
++#
++# Split the rescue system into a small initramfs and a SquashFS overlay.
++# The overlay contains firmware files and non-essential kernel modules.
++# At boot time, a startup script mounts the overlay from the ISO and
++# copies its content into the running rescue system.
++#
++# This file is part of Relax-and-Recover, licensed under the GNU General
++# Public License. Refer to the included COPYING for full text of license.
++
++# Determine overlay mode: "copy" or "mount"
++local overlay_mode=""
++case "$REAR_INITRD_OVERLAY" in
++    (copy)     overlay_mode="copy" ;;
++    (mount)    overlay_mode="mount" ;;
++    (*)        return 0 ;;
++esac
++
++case "$OUTPUT" in
++    (ISO|PXE|USB) ;;
++    (*) Error "REAR_INITRD_OVERLAY is only supported with OUTPUT=ISO, OUTPUT=PXE or OUTPUT=USB (current OUTPUT=$OUTPUT)" ;;
++esac
++
++type mksquashfs &>/dev/null || Error "REAR_INITRD_OVERLAY requires 'mksquashfs' (install the squashfs-tools package)"
++
++test "$KERNEL_VERSION" || BugError "KERNEL_VERSION is not set"
++
++local overlay_dir="$TMP_DIR/rear-overlay-content"
++local overlay_sqsh="$TMP_DIR/rear-overlay.sqsh"
++local overlay_filename="rear-overlay.sqsh"
++
++local rootfs_size_before=$( du -sm "$ROOTFS_DIR" | cut -f1 )
++LogPrint "Creating recovery system overlay (rootfs is $rootfs_size_before MiB before split)"
++
++# Resolve the actual lib path (may be a symlink, e.g. lib -> usr/lib)
++local lib_realpath=$( readlink -f "$ROOTFS_DIR/lib" )
++local lib_relpath="${lib_realpath#$ROOTFS_DIR/}"
++
++mkdir -p "$overlay_dir/$lib_relpath"
++
++# Move firmware files to overlay
++if test -d "$ROOTFS_DIR/$lib_relpath/firmware" ; then
++    local firmware_size=$( du -sm "$ROOTFS_DIR/$lib_relpath/firmware" | cut -f1 )
++    LogPrint "Moving firmware files ($firmware_size MiB) to overlay"
++    mv "$ROOTFS_DIR/$lib_relpath/firmware" "$overlay_dir/$lib_relpath/firmware"
++    mkdir -p "$ROOTFS_DIR/$lib_relpath/firmware"
++fi
++
++# Move non-essential kernel modules to overlay.
++# Keep only modules needed at boot time to access the overlay:
++#   ISO: storage controllers and CD/DVD drivers to mount the ISO device
++#   PXE: network drivers to download the overlay from TFTP/HTTP server
++# Common: filesystems (squashfs, overlayfs) and compression libraries
++local modules_dir="$ROOTFS_DIR/$lib_relpath/modules/$KERNEL_VERSION"
++if test -d "$modules_dir/kernel" ; then
++    local modules_size_before=$( du -sm "$modules_dir" | cut -f1 )
++
++    mkdir -p "$overlay_dir/$lib_relpath/modules/$KERNEL_VERSION/kernel"
++
++    if IsInArray "all_modules" "${MODULES[@]}" ; then
++        # MODULES=('all_modules'): use directory-based approach to keep
++        # entire driver categories needed to access the overlay device.
++        local essential_dirs="
++            kernel/fs/squashfs
++            kernel/fs/overlayfs
++            kernel/fs/nls
++            kernel/drivers/block
++            kernel/lib
++        "
++
++        if is_true "$GRUB_RESCUE" ; then
++            if test "$GRUB_RESCUE_BOOT_FSTYPE" ; then
++                case "$GRUB_RESCUE_BOOT_FSTYPE" in
++                    (ext[234]) essential_dirs+=" kernel/fs/ext4 kernel/fs/jbd2" ;;
++                    (*)        essential_dirs+=" kernel/fs/$GRUB_RESCUE_BOOT_FSTYPE" ;;
++                esac
++            fi
++            if test "$GRUB_RESCUE_BOOT_DRIVER" ; then
++                local boot_driver_modpath=$( modinfo -k $KERNEL_VERSION -F filename "$GRUB_RESCUE_BOOT_DRIVER" 2>/dev/null )
++                if test "$boot_driver_modpath" ; then
++                    local boot_driver_dir="${boot_driver_modpath#*/kernel/}"
++                    boot_driver_dir="kernel/${boot_driver_dir%/*}"
++                    essential_dirs+=" $boot_driver_dir"
++                fi
++            fi
++        fi
++
++        case "$OUTPUT" in
++            (ISO)
++                essential_dirs+="
++                    kernel/drivers/ata
++                    kernel/drivers/scsi
++                    kernel/drivers/cdrom
++                    kernel/drivers/usb
++                    kernel/drivers/virtio
++                    kernel/drivers/message
++                    kernel/drivers/firewire
++                    kernel/drivers/hv
++                    kernel/fs/isofs
++                    kernel/fs/udf
++                "
++                ;;
++            (USB)
++                essential_dirs+="
++                    kernel/drivers/ata
++                    kernel/drivers/scsi
++                    kernel/drivers/usb
++                    kernel/drivers/virtio
++                    kernel/drivers/message
++                    kernel/drivers/firewire
++                    kernel/drivers/hv
++                    kernel/fs/ext4
++                    kernel/fs/jbd2
++                "
++                ;;
++            (PXE)
++                essential_dirs+="
++                    kernel/drivers/net
++                "
++                ;;
++        esac
++
++        test "$ARCH" = "Linux-s390" && essential_dirs+=" kernel/drivers/s390"
++
++        # Move each subdirectory under kernel/ to overlay unless it is essential
++        for subdir in "$modules_dir/kernel"/*/ ; do
++            test -d "$subdir" || continue
++            local dirname=$( basename "$subdir" )
++            local keep="no"
++            for essential in $essential_dirs ; do
++                if test "kernel/$dirname" = "$( echo "$essential" | cut -d/ -f1-2 )" ; then
++                    keep="yes"
++                    break
++                fi
++            done
++            if is_true "$keep" ; then
++                if test "$dirname" = "drivers" || test "$dirname" = "fs" ; then
++                    mkdir -p "$overlay_dir/$lib_relpath/modules/$KERNEL_VERSION/kernel/$dirname"
++                    for sub2dir in "$subdir"*/ ; do
++                        test -d "$sub2dir" || continue
++                        local sub2name=$( basename "$sub2dir" )
++                        local keep_sub="no"
++                        for essential in $essential_dirs ; do
++                            if test "kernel/$dirname/$sub2name" = "$essential" ; then
++                                keep_sub="yes"
++                                break
++                            fi
++                        done
++                        if ! is_true "$keep_sub" ; then
++                            mv "$sub2dir" "$overlay_dir/$lib_relpath/modules/$KERNEL_VERSION/kernel/$dirname/"
++                        fi
++                    done
++                fi
++            else
++                mv "$subdir" "$overlay_dir/$lib_relpath/modules/$KERNEL_VERSION/kernel/"
++            fi
++        done
++
++    else
++        # MODULES is restricted (loaded_modules, empty, or explicit list).
++        # Only keep modules that are currently loaded plus a small set needed
++        # for overlay access. Move everything else to the overlay.
++        # The dependency resolution step below will pull in any missing deps.
++        local essential_modules="loop squashfs overlay"
++        case "$OUTPUT" in
++            (ISO)  essential_modules+=" isofs udf sr_mod cdrom" ;;
++            (USB)  essential_modules+=" ext4 jbd2" ;;
++        esac
++        if is_true "$GRUB_RESCUE" && test "$GRUB_RESCUE_BOOT_FSTYPE" ; then
++            essential_modules+=" $GRUB_RESCUE_BOOT_FSTYPE"
++            case "$GRUB_RESCUE_BOOT_FSTYPE" in
++                (ext[234]) essential_modules+=" ext4 jbd2" ;;
++            esac
++        fi
++
++        # Build list of modules to keep: loaded + essential
++        local keep_modules=" $essential_modules "
++        while read mod_name rest ; do
++            keep_modules+="$mod_name "
++        done < /proc/modules
++
++        # Move non-kept modules to overlay, one by one
++        while IFS= read -r -d '' ko_file ; do
++            local mod_basename="${ko_file##*/}"
++            local mod_name="${mod_basename%%.*}"
++            if test "${keep_modules/ $mod_name / }" = "$keep_modules" ; then
++                # Module is not in keep list, move to overlay
++                local ko_relpath="${ko_file#$modules_dir/}"
++                local ko_overlay_dir="$overlay_dir/$lib_relpath/modules/$KERNEL_VERSION/$( dirname "$ko_relpath" )"
++                mkdir -p "$ko_overlay_dir"
++                mv "$ko_file" "$ko_overlay_dir/"
++            fi
++        done < <( find "$modules_dir/kernel" -name '*.ko*' -print0 )
++
++        # Clean up empty directories left behind
++        find "$modules_dir/kernel" -type d -empty -delete 2>/dev/null
++    fi
++
++    # Pull in module dependencies: some essential modules depend on modules
++    # that landed in the overlay (e.g. hv_storvsc needs hv_vmbus, qla2xxx
++    # needs scsi_transport_fc and nvme modules). Resolve the full dependency
++    # tree and copy back any missing modules from the overlay.
++    local dep_count=0
++    while IFS= read -r -d '' ko_file ; do
++        local mod_basename="${ko_file##*/}"
++        local mod_name="${mod_basename%%.*}"
++        while IFS= read -r dep_line ; do
++            # modprobe --show-depends outputs "insmod /lib/modules/.../foo.ko.xz"
++            # but /lib may be a symlink to usr/lib, so resolve the real path
++            local dep_path="${dep_line#insmod }"
++            dep_path="${dep_path%% }"
++            local dep_realpath="$( readlink -f "$ROOTFS_DIR$dep_path" 2>/dev/null )"
++            test -f "$dep_realpath" && continue
++            # Module is missing from initramfs, look for it in the overlay
++            # Convert /lib/modules/... or /usr/lib/modules/... to a relative path
++            local dep_modrelpath="${dep_path}"
++            dep_modrelpath="${dep_modrelpath#/lib/modules/}"
++            dep_modrelpath="${dep_modrelpath#/usr/lib/modules/}"
++            local dep_overlay="$overlay_dir/$lib_relpath/modules/$dep_modrelpath"
++            local dep_dst="$ROOTFS_DIR/$lib_relpath/modules/$dep_modrelpath"
++            if test -f "$dep_overlay" ; then
++                mkdir -p "$( dirname "$dep_dst" )"
++                cp -a "$dep_overlay" "$dep_dst"
++                dep_count=$(( dep_count + 1 ))
++            fi
++        done < <( modprobe -S $KERNEL_VERSION --show-depends "$mod_name" 2>/dev/null | grep '^insmod ' )
++    done < <( find "$modules_dir" -name '*.ko*' -print0 )
++    test $dep_count -gt 0 && LogPrint "Pulled $dep_count module dependencies into initramfs"
++
++    local modules_size_after=$( du -sm "$modules_dir" | cut -f1 )
++    LogPrint "Kept $modules_size_after MiB of essential kernel modules in initramfs (was $modules_size_before MiB)"
++
++    # Regenerate module dependency files for the reduced set in initramfs
++    Log "Running depmod for reduced initramfs modules"
++    depmod -b "$ROOTFS_DIR" $KERNEL_VERSION
++
++    # Copy back firmware files required by the essential modules.
++    # Some drivers (e.g. bnx2, tg3, qla2xxx) need firmware to initialize.
++    # Without their firmware in the initramfs, those drivers cannot function
++    # at boot time to access the overlay.
++    if test -d "$overlay_dir/$lib_relpath/firmware" ; then
++        local fw_count=0
++        while IFS= read -r -d '' ko_file ; do
++            while IFS= read -r fw_name ; do
++                test -n "$fw_name" || continue
++                # Firmware files may be compressed (.xz, .zst) on disk
++                local fw_src=""
++                for candidate in \
++                    "$overlay_dir/$lib_relpath/firmware/$fw_name" \
++                    "$overlay_dir/$lib_relpath/firmware/$fw_name.xz" \
++                    "$overlay_dir/$lib_relpath/firmware/$fw_name.zst" ; do
++                    test -f "$candidate" && fw_src="$candidate" && break
++                done
++                test -n "$fw_src" || continue
++                local fw_dst="$ROOTFS_DIR/$lib_relpath/firmware/${fw_src#$overlay_dir/$lib_relpath/firmware/}"
++                if ! test -f "$fw_dst" ; then
++                    mkdir -p "$( dirname "$fw_dst" )"
++                    cp -a "$fw_src" "$fw_dst"
++                    fw_count=$(( fw_count + 1 ))
++                fi
++            done < <( modinfo -k $KERNEL_VERSION -F firmware "$ko_file" 2>/dev/null )
++        done < <( find "$modules_dir" -name '*.ko*' -print0 )
++        test $fw_count -gt 0 && LogPrint "Kept $fw_count firmware files required by essential modules"
++
++        # Also keep firmware files explicitly listed in REAR_INITRD_FIRMWARE_FILES
++        if test ${#REAR_INITRD_FIRMWARE_FILES[@]} -gt 0 ; then
++            local manual_fw_count=0
++            for fw_pattern in "${REAR_INITRD_FIRMWARE_FILES[@]}" ; do
++                while IFS= read -r -d '' fw_file ; do
++                    local fw_rel="${fw_file#$overlay_dir/$lib_relpath/firmware/}"
++                    local fw_dst="$ROOTFS_DIR/$lib_relpath/firmware/$fw_rel"
++                    if ! test -f "$fw_dst" ; then
++                        mkdir -p "$( dirname "$fw_dst" )"
++                        cp -a "$fw_file" "$fw_dst"
++                        manual_fw_count=$(( manual_fw_count + 1 ))
++                    fi
++                done < <( find "$overlay_dir/$lib_relpath/firmware" -path "*/$fw_pattern" -print0 2>/dev/null )
++            done
++            test $manual_fw_count -gt 0 && LogPrint "Kept $manual_fw_count additional firmware files from REAR_INITRD_FIRMWARE_FILES"
++        fi
++    fi
++fi
++
++# Create the SquashFS overlay image
++local start_seconds=$( date +%s )
++LogPrint "Creating SquashFS overlay image $overlay_filename"
++if ! mksquashfs "$overlay_dir" "$overlay_sqsh" -comp xz -no-progress 2>>/dev/$DISPENSABLE_OUTPUT_DEV ; then
++    Error "Failed to create SquashFS overlay image"
++fi
++local needed_seconds=$(( $( date +%s ) - start_seconds ))
++local overlay_bytes=$( stat -L -c '%s' "$overlay_sqsh" )
++local overlay_MiB=$( mathlib_calculate "$overlay_bytes / 1048576" )
++local rootfs_size_after=$( du -sm "$ROOTFS_DIR" | cut -f1 )
++
++LogPrint "Created $overlay_filename ($overlay_MiB MiB) in $needed_seconds seconds"
++LogPrint "Rootfs reduced from $rootfs_size_before MiB to $rootfs_size_after MiB"
++
++# Write marker file so the boot script knows to look for the overlay
++cat > "$ROOTFS_DIR/etc/rear-overlay.conf" <<EOF
++# ReaR overlay configuration - generated by 500_create_rear_overlay.sh
++REAR_OVERLAY_FILENAME="$overlay_filename"
++REAR_OVERLAY_MODE="$overlay_mode"
++REAR_OVERLAY_OUTPUT="$OUTPUT"
++EOF
++# For USB output, store the path and filesystem label so the boot script
++# can find and mount the USB device to access the overlay
++if test "$OUTPUT" = "USB" ; then
++    cat >> "$ROOTFS_DIR/etc/rear-overlay.conf" <<EOF
++REAR_OVERLAY_USB_PREFIX="$USB_PREFIX"
++REAR_OVERLAY_USB_LABEL="$USB_DEVICE_FILESYSTEM_LABEL"
++EOF
++fi
++
++# md5sums.txt is created by pack/GNU/Linux/800_md5sums_rootfs.sh which
++# runs after this script, so it will reflect the reduced rootfs content.
+diff --git a/usr/share/rear/build/default/995_md5sums_rootfs.sh b/usr/share/rear/pack/GNU/Linux/800_md5sums_rootfs.sh
+similarity index 83%
+rename from usr/share/rear/build/default/995_md5sums_rootfs.sh
+rename to usr/share/rear/pack/GNU/Linux/800_md5sums_rootfs.sh
+index bc1e4a1c4..5a3bbfef0 100644
+--- a/usr/share/rear/build/default/995_md5sums_rootfs.sh
++++ b/usr/share/rear/pack/GNU/Linux/800_md5sums_rootfs.sh
+@@ -1,8 +1,11 @@
+ 
+-# build/default/995_md5sums_rootfs.sh
++# pack/GNU/Linux/800_md5sums_rootfs.sh
+ #
+-# Create md5sums for all regular files in ROOTFS_DIR
+-# and store the result in ROOTFS_DIR as md5sums.txt
++# Create md5sums for all regular files in ROOTFS_DIR.
++# This runs in the pack stage (after rootfs modifications like the overlay
++# split in 500_create_rear_overlay.sh) so that md5sums match the final
++# initramfs content.
++# The result is stored in ROOTFS_DIR as md5sums.txt
+ # so that in the recovery system one can test via
+ #   pushd / ; md5sum --quiet --check md5sums.txt ; popd
+ # if the regular files in the recovery system are intact.
+@@ -50,6 +53,8 @@ pushd $ROOTFS_DIR 1>&2
+     # firmware/brcm/brcmfmac43430a0-sdio.ONDA-V80 PLUS.txt
+     # firmware/brcm/brcmfmac43455-sdio.MINIX-NEO Z83-4.txt
+     # cf. https://github.com/rear/rear/issues/2407
+-    find . -xdev -type f -print0 | grep -E -z -v '/md5sums\.txt|/\.gitignore|~$|/dev/' | xargs -0 md5sum -b >>$md5sums_file || cat /dev/null >$md5sums_file
++    # Also exclude module metadata files (modules.dep, modules.alias, etc.)
++    # because depmod regenerates them at boot time after overlay application
++    find . -xdev -type f -print0 | grep -E -z -v '/md5sums\.txt|/\.gitignore|~$|/dev/|/modules\.(dep|alias|symbols|devname|softdep)(\.bin)?$' | xargs -0 md5sum -b >>$md5sums_file || cat /dev/null >$md5sums_file
+ popd 1>&2
+ 
+diff --git a/usr/share/rear/prep/default/395_include_overlay_tools.sh b/usr/share/rear/prep/default/395_include_overlay_tools.sh
+new file mode 100644
+index 000000000..e2fd881bc
+--- /dev/null
++++ b/usr/share/rear/prep/default/395_include_overlay_tools.sh
+@@ -0,0 +1,35 @@
++
++# Include tools needed for the initrd overlay feature.
++# depmod is required to regenerate module dependencies after
++# the overlay content is copied into the rescue system at boot time.
++# curl is required for PXE output to download the overlay from the server.
++
++test "$REAR_INITRD_OVERLAY" || return 0
++
++PROGS+=( depmod )
++
++if test "$OUTPUT" = "PXE" ; then
++    REQUIRED_PROGS+=( curl )
++fi
++
++# Ensure modules needed for overlay access are included in the rescue system
++# even when MODULES is restricted to loaded modules only.
++MODULES_LOAD+=( loop squashfs overlay )
++case "$OUTPUT" in
++    (ISO) MODULES_LOAD+=( isofs udf sr_mod cdrom ) ;;
++    (USB) MODULES_LOAD+=( ext4 jbd2 ) ;;
++esac
++
++# When GRUB_RESCUE is enabled, detect the /boot filesystem type and storage
++# driver at prep time so the pack stage can keep the right modules in the
++# initramfs. The output stage (940_grub2_rescue.sh) uses boot_dir="/boot"
++# and we must match that here.
++if is_true "$GRUB_RESCUE" ; then
++    GRUB_RESCUE_BOOT_DIR="/boot"
++    GRUB_RESCUE_BOOT_FSTYPE=$( df -T "$GRUB_RESCUE_BOOT_DIR" 2>/dev/null | awk 'END {print $2}' )
++    GRUB_RESCUE_BOOT_DISK=$( lsblk -no PKNAME "$( df "$GRUB_RESCUE_BOOT_DIR" 2>/dev/null | awk 'END {print $1}' )" 2>/dev/null | head -1 )
++    if test "$GRUB_RESCUE_BOOT_DISK" ; then
++        GRUB_RESCUE_BOOT_DRIVER=$( basename "$( readlink "/sys/block/$GRUB_RESCUE_BOOT_DISK/device/driver" 2>/dev/null )" 2>/dev/null )
++    fi
++    Log "GRUB_RESCUE: $GRUB_RESCUE_BOOT_DIR uses $GRUB_RESCUE_BOOT_FSTYPE on $GRUB_RESCUE_BOOT_DRIVER (disk $GRUB_RESCUE_BOOT_DISK)"
++fi
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup b/usr/share/rear/skel/default/etc/scripts/system-setup
+index cdd488e75..df2931356 100755
+--- a/usr/share/rear/skel/default/etc/scripts/system-setup
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup
+@@ -80,7 +80,7 @@ fi
+ #   ./etc/inittab: FAILED
+ #   ./etc/issue: FAILED
+ # The /md5sums.txt file would be empty if the md5sums were not successfully created
+-# during "rear mkrescue/mkbackup" by the build/default/995_md5sums_rootfs.sh script:
++# during "rear mkrescue/mkbackup" by the pack/GNU/Linux/800_md5sums_rootfs.sh script:
+ if test -s "/md5sums.txt" ; then
+     echo -e "\nVerifying md5sums of the files in the Relax-and-Recover rescue system"
+     # /etc/motd is excluded because it was changed above when default.conf is missing.
+diff --git a/usr/share/rear/skel/default/etc/scripts/system-setup.d/02-mount-rear-overlay.sh b/usr/share/rear/skel/default/etc/scripts/system-setup.d/02-mount-rear-overlay.sh
+new file mode 100644
+index 000000000..4d3d5ba3c
+--- /dev/null
++++ b/usr/share/rear/skel/default/etc/scripts/system-setup.d/02-mount-rear-overlay.sh
+@@ -0,0 +1,257 @@
++# Mount the ReaR initrd overlay from the ISO/USB device or download it
++# from a PXE server. This must run before udev starts (before
++# 40-start-udev-or-load-modules.sh) so that all kernel modules and
++# firmware are available for hardware detection.
++
++# Skip if already loaded (prevent double execution)
++test -e /tmp/.rear-overlay-loaded && { return 0 2>/dev/null; exit 0; }
++
++# Parse rear_overlay= from kernel cmdline (used by PXE and GRUB_RESCUE)
++REAR_OVERLAY_CMDLINE=""
++for param in $(cat /proc/cmdline) ; do
++    case "$param" in
++        (rear_overlay=*) REAR_OVERLAY_CMDLINE="${param#rear_overlay=}" ;;
++    esac
++done
++
++# If rear_overlay= is a UUID:path (GRUB_RESCUE), override the output method
++if test "${REAR_OVERLAY_CMDLINE#UUID=}" != "$REAR_OVERLAY_CMDLINE" ; then
++    REAR_OVERLAY_OUTPUT="GRUB"
++    REAR_OVERLAY_MODE="copy"
++    REAR_OVERLAY_GRUB_BOOT_UUID="${REAR_OVERLAY_CMDLINE#UUID=}"
++    REAR_OVERLAY_GRUB_BOOT_UUID="${REAR_OVERLAY_GRUB_BOOT_UUID%%:*}"
++    REAR_OVERLAY_GRUB_PATH="${REAR_OVERLAY_CMDLINE#*:}"
++    REAR_OVERLAY_FILENAME="${REAR_OVERLAY_GRUB_PATH##*/}"
++elif test -s /etc/rear-overlay.conf ; then
++    source /etc/rear-overlay.conf
++else
++    { return 0 2>/dev/null; exit 0; }
++fi
++
++# Load virtual/pseudo modules that udev cannot auto-detect (no hardware modalias)
++modprobe loop 2>/dev/null
++modprobe squashfs 2>/dev/null
++modprobe overlay 2>/dev/null
++
++# Use udev to auto-detect hardware and load the matching drivers from the
++# initramfs. The pack stage already selected the essential modules for the
++# output method (storage for ISO/USB, network for PXE), so udev will only
++# load what is available and what matches actual hardware.
++echo "Starting udev to detect hardware for ReaR initrd overlay access ..."
++udevd --daemon 2>/dev/null
++udevadm trigger --action=add 2>/dev/null
++echo -n "Waiting for udev ... "
++udevadm settle --timeout=30 2>/dev/null
++echo "done."
++
++case "$REAR_OVERLAY_OUTPUT" in
++    (ISO)
++
++        echo "Searching for ReaR ISO device ..."
++        REAR_ISO_DEVICE=""
++        for dev in /dev/sr[0-9]* /dev/cd[0-9]* ; do
++            test -b "$dev" || continue
++            mkdir -p /mnt/rear-iso
++            if mount -t iso9660 -o ro "$dev" /mnt/rear-iso 2>/dev/null ; then
++                if test -f "/mnt/rear-iso/isolinux/$REAR_OVERLAY_FILENAME" ; then
++                    REAR_ISO_DEVICE="$dev"
++                    break
++                fi
++                umount /mnt/rear-iso
++            fi
++        done
++
++        if test -z "$REAR_ISO_DEVICE" ; then
++            echo "WARNING: Could not find ReaR ISO with ReaR initrd overlay."
++            echo "Some essential kernel modules and/or firmwares may be missing."
++            rmdir /mnt/rear-iso 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++
++        echo "Found ReaR ISO on $REAR_ISO_DEVICE"
++        echo "Mounting overlay $REAR_OVERLAY_FILENAME ..."
++        mkdir -p /mnt/rear-overlay
++        if ! mount -t squashfs -o ro "/mnt/rear-iso/isolinux/$REAR_OVERLAY_FILENAME" /mnt/rear-overlay ; then
++            echo "WARNING: Failed to mount ReaR initrd overlay. Continuing without it."
++            umount /mnt/rear-iso
++            rmdir /mnt/rear-overlay /mnt/rear-iso 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++        ;;
++
++    (USB)
++        echo "Searching for ReaR USB device (label $REAR_OVERLAY_USB_LABEL) ..."
++        REAR_USB_DEVICE=""
++        # Try by-label first, then scan sd* devices
++        if test -b "/dev/disk/by-label/$REAR_OVERLAY_USB_LABEL" ; then
++            REAR_USB_DEVICE="/dev/disk/by-label/$REAR_OVERLAY_USB_LABEL"
++        else
++            for dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* ; do
++                test -b "$dev" || continue
++                mkdir -p /mnt/rear-usb
++                if mount -o ro "$dev" /mnt/rear-usb 2>/dev/null ; then
++                    if test -f "/mnt/rear-usb/$REAR_OVERLAY_USB_PREFIX/$REAR_OVERLAY_FILENAME" ; then
++                        REAR_USB_DEVICE="$dev"
++                        umount /mnt/rear-usb
++                        break
++                    fi
++                    umount /mnt/rear-usb
++                fi
++            done
++        fi
++
++        if test -z "$REAR_USB_DEVICE" ; then
++            echo "WARNING: Could not find ReaR USB device with ReaR initrd overlay."
++            echo "Some essential kernel modules and/or firmwares may be missing."
++            rmdir /mnt/rear-usb 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++
++        echo "Found ReaR USB device $REAR_USB_DEVICE"
++        mkdir -p /mnt/rear-usb
++        if ! mount -o ro "$REAR_USB_DEVICE" /mnt/rear-usb ; then
++            echo "WARNING: Failed to mount USB device. Continuing without ReaR initrd overlay."
++            rmdir /mnt/rear-usb 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++
++        echo "Mounting overlay $REAR_OVERLAY_FILENAME ..."
++        mkdir -p /mnt/rear-overlay
++        if ! mount -t squashfs -o ro "/mnt/rear-usb/$REAR_OVERLAY_USB_PREFIX/$REAR_OVERLAY_FILENAME" /mnt/rear-overlay ; then
++            echo "WARNING: Failed to mount ReaR initrd overlay. Continuing without it."
++            umount /mnt/rear-usb
++            rmdir /mnt/rear-overlay /mnt/rear-usb 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++        ;;
++
++    (GRUB)
++        echo "Mounting boot partition (UUID=$REAR_OVERLAY_GRUB_BOOT_UUID) ..."
++        mkdir -p /mnt/rear-boot
++        if ! mount -o ro UUID="$REAR_OVERLAY_GRUB_BOOT_UUID" /mnt/rear-boot ; then
++            echo "WARNING: Failed to mount boot partition. Continuing without ReaR initrd overlay."
++            rmdir /mnt/rear-boot 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++
++        echo "Mounting overlay $REAR_OVERLAY_FILENAME ..."
++        mkdir -p /mnt/rear-overlay
++        if ! mount -t squashfs -o ro "/mnt/rear-boot/$REAR_OVERLAY_GRUB_PATH" /mnt/rear-overlay ; then
++            echo "WARNING: Failed to mount ReaR initrd overlay. Continuing without it."
++            umount /mnt/rear-boot
++            rmdir /mnt/rear-overlay /mnt/rear-boot 2>/dev/null
++            { return 0 2>/dev/null; exit 0; }
++        fi
++        ;;
++
++    (PXE)
++        # Bring up the network using the auto-generated setup scripts
++        # These handle both static IP and DHCP configurations
++        echo "Configuring network for overlay download ..."
++        if test -s /etc/scripts/system-setup.d/60-network-devices.sh ; then
++            source /etc/scripts/system-setup.d/60-network-devices.sh
++        fi
++        if test -s /etc/scripts/system-setup.d/62-routing.sh ; then
++            source /etc/scripts/system-setup.d/62-routing.sh
++        fi
++        # If DHCP is configured, start dhclient
++        if is_true $USE_DHCLIENT 2>/dev/null ; then
++            if test -s /etc/scripts/system-setup.d/58-start-dhclient.sh ; then
++                source /etc/scripts/system-setup.d/58-start-dhclient.sh
++            fi
++        fi
++
++        # Use the overlay URL parsed from kernel command line
++        rear_overlay_url="$REAR_OVERLAY_CMDLINE"
++
++        if test -z "$rear_overlay_url" ; then
++            echo "WARNING: No rear_overlay= kernel parameter found for ReaR initrd overlay."
++            echo "Some essential kernel modules and/or firmwares may be missing."
++            { return 0 2>/dev/null; exit 0; }
++        fi
++
++        echo "Downloading overlay from $rear_overlay_url ..."
++        mkdir -p /tmp
++        if ! curl -s -f -o "/tmp/$REAR_OVERLAY_FILENAME" "$rear_overlay_url" ; then
++            echo "WARNING: Failed to download ReaR initrd overlay. Continuing without it."
++            { return 0 2>/dev/null; exit 0; }
++        fi
++
++        echo "Mounting overlay $REAR_OVERLAY_FILENAME ..."
++        mkdir -p /mnt/rear-overlay
++        if ! mount -t squashfs -o ro "/tmp/$REAR_OVERLAY_FILENAME" /mnt/rear-overlay ; then
++            echo "WARNING: Failed to mount ReaR initrd overlay. Continuing without it."
++            rm -f "/tmp/$REAR_OVERLAY_FILENAME"
++            { return 0 2>/dev/null; exit 0; }
++        fi
++        ;;
++
++    (*)
++        echo "WARNING: Unknown ReaR initrd overlay output type '$REAR_OVERLAY_OUTPUT'."
++        { return 0 2>/dev/null; exit 0; }
++        ;;
++esac
++
++# Apply the overlay content using the configured mode
++case "$REAR_OVERLAY_MODE" in
++    (mount)
++        echo "Setting up overlayfs mounts (overlay stays mounted) ..."
++
++        if test -d /mnt/rear-overlay/usr/lib/firmware ; then
++            mkdir -p /tmp/overlay-work/firmware/upper /tmp/overlay-work/firmware/work
++            mount -t overlay overlay \
++                -o lowerdir=/mnt/rear-overlay/usr/lib/firmware:/usr/lib/firmware,upperdir=/tmp/overlay-work/firmware/upper,workdir=/tmp/overlay-work/firmware/work \
++                /usr/lib/firmware
++        fi
++
++        if test -d /mnt/rear-overlay/usr/lib/modules ; then
++            mkdir -p /tmp/overlay-work/modules/upper /tmp/overlay-work/modules/work
++            mount -t overlay overlay \
++                -o lowerdir=/mnt/rear-overlay/usr/lib/modules:/usr/lib/modules,upperdir=/tmp/overlay-work/modules/upper,workdir=/tmp/overlay-work/modules/work \
++                /usr/lib/modules
++        fi
++        ;;
++    (*)
++        echo "Loading overlay content into rescue system ..."
++        ( cd /mnt/rear-overlay && tar cf - . ) | ( cd / && tar xf - )
++
++        echo "Cleaning up overlay mounts ..."
++        umount /mnt/rear-overlay
++        rmdir /mnt/rear-overlay 2>/dev/null
++        case "$REAR_OVERLAY_OUTPUT" in
++            (ISO)
++                umount /mnt/rear-iso
++                rmdir /mnt/rear-iso 2>/dev/null
++                ;;
++            (USB)
++                umount /mnt/rear-usb
++                rmdir /mnt/rear-usb 2>/dev/null
++                ;;
++            (PXE)
++                rm -f "/tmp/$REAR_OVERLAY_FILENAME"
++                ;;
++            (GRUB)
++                umount /mnt/rear-boot
++                rmdir /mnt/rear-boot 2>/dev/null
++                ;;
++        esac
++        ;;
++esac
++
++# Regenerate module dependencies with the full module set
++depmod -a 2>/dev/null
++
++# Retrigger udev so it can detect hardware that needs modules from the overlay
++echo -n "Re-triggering udev with full module set ... "
++udevadm trigger --action=add 2>/dev/null
++udevadm settle --timeout=30 2>/dev/null
++echo "done."
++
++# Stop udev - the regular 40-start-udev-or-load-modules.sh will handle it from here
++udevadm control --exit 2>/dev/null
++killall udevd 2>/dev/null
++
++# Mark as loaded to prevent double execution
++touch /tmp/.rear-overlay-loaded
++
++echo "Overlay loaded successfully."
+-- 
+2.55.0
+

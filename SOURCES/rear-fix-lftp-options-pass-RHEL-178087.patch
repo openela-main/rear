@@ -1,0 +1,81 @@
+eFrom da9200db491c37662f0c6dc734dcb31e1efc0275 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Renaud=20M=C3=A9trich?= <rmetrich@redhat.com>
+Date: Wed, 20 May 2026 10:18:50 +0200
+Subject: [PATCH 1/2] Fix lftp command to pass options prior to opening the URL
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The lftp command needs to apply the user specified options prior to
+opening the URL, otherwise the options won't apply for the opening
+itself.
+This is problematic when users use a custom program to connect, e.g.
+OUTPUT_LFTP_OPTIONS=( "set sftp:connect-program ..." )
+
+The issue was introduced by commit c4ddb00f1f9eba7b036a6a54788080f2197badde.
+
+Signed-off-by: Renaud Métrich <rmetrich@redhat.com>
+---
+ usr/share/rear/output/default/950_copy_result_files.sh | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/usr/share/rear/output/default/950_copy_result_files.sh b/usr/share/rear/output/default/950_copy_result_files.sh
+index 20724e632d..174952028f 100644
+--- a/usr/share/rear/output/default/950_copy_result_files.sh
++++ b/usr/share/rear/output/default/950_copy_result_files.sh
+@@ -139,25 +139,25 @@ case "$scheme" in
+         local lftp_user_opts lftp_cmds_heredoc
+         local lftp_cmds=("${OUTPUT_LFTP_OPTIONS[@]}")
+         lftp_cmds+=(
++            "open $OUTPUT_URL"
+             "mkdir -fp ${path}"
+             "mput ${RESULT_FILES[*]}"
+         )
+ 
+-    	lftp_cmds_heredoc=$(IFS=$'\n'; echo "${lftp_cmds[*]}")
++        lftp_cmds_heredoc=$(IFS=$'\n'; echo "${lftp_cmds[*]}")
+ 
+         if contains_visible_char "$OUTPUT_LFTP_USERNAME" ; then
+             { lftp_user_opts="-u $OUTPUT_LFTP_USERNAME,$OUTPUT_LFTP_PASSWORD" ; } 2>>/dev/$SECRET_OUTPUT_DEV
+-            Log "lftp -u $OUTPUT_LFTP_USERNAME,******* $OUTPUT_URL"
++            Log "lftp -u $OUTPUT_LFTP_USERNAME,******* <<< '$lftp_cmds_heredoc'"
+         else
+-            Log "lftp $lftp_user_opts $OUTPUT_URL"
++            Log "lftp $lftp_user_opts <<< '$lftp_cmds_heredoc'"
+         fi
+ 
+-        Log "$lftp_cmds_heredoc"
+         # Make sure that destination directory exists, otherwise lftp would copy
+         # RESULT_FILES into last available directory in the path.
+         # e.g. OUTPUT_URL=sftp://<host_name>/iso/server1 and have "/iso/server1"
+         # directory missing, would upload RESULT_FILES into sftp://<host_name>/iso/
+-        { lftp $lftp_user_opts "$OUTPUT_URL" <<< "$lftp_cmds_heredoc" 
++        { lftp $lftp_user_opts <<< "$lftp_cmds_heredoc"
+         } 2>/dev/null \
+             || Error "lftp failed to transfer '${RESULT_FILES[*]}' to '$OUTPUT_URL' (lftp exit code: $?)"
+         ;;
+
+From 958231f8a4fdba028ba396e1147f8ad7ee654307 Mon Sep 17 00:00:00 2001
+From: Gratien D'haese <gratien.dhaese@gmail.com>
+Date: Tue, 9 Jun 2026 14:32:05 +0200
+Subject: [PATCH 2/2] Potential fix for pull request finding
+
+Co-authored-by: Copilot Autofix powered by AI <175728472+Copilot@users.noreply.github.com>
+---
+ usr/share/rear/output/default/950_copy_result_files.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/usr/share/rear/output/default/950_copy_result_files.sh b/usr/share/rear/output/default/950_copy_result_files.sh
+index 174952028f..f8ab79ecf5 100644
+--- a/usr/share/rear/output/default/950_copy_result_files.sh
++++ b/usr/share/rear/output/default/950_copy_result_files.sh
+@@ -139,7 +139,7 @@ case "$scheme" in
+         local lftp_user_opts lftp_cmds_heredoc
+         local lftp_cmds=("${OUTPUT_LFTP_OPTIONS[@]}")
+         lftp_cmds+=(
+-            "open $OUTPUT_URL"
++            "open \"$OUTPUT_URL\""
+             "mkdir -fp ${path}"
+             "mput ${RESULT_FILES[*]}"
+         )
+t
